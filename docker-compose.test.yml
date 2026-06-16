@@ -1,0 +1,27 @@
+# Integration-test stack: a real Postgres plus the application container.
+# These are throwaway, test-only credentials passed via the environment — the
+# application source itself reads its DSN from DATABASE_URL and hard-codes none.
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet
+      POSTGRES_DB: fleet_test
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://fleet:fleet@db:5432/fleet_test
+    depends_on:
+      db:
+        condition: service_healthy

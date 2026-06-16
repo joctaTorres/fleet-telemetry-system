@@ -1,0 +1,9 @@
+.git
+.venv
+.ratchet
+.pytest_cache
+docs
+**/__pycache__
+*.log
+.opencode
+.claude
