@@ -106,6 +106,47 @@ FROM vehicle_current_state
 GROUP BY status
 """
 
+# Pessimistic row lock on the authoritative vehicle row. Taken first inside the
+# fault transaction so all fault handling for one vehicle serializes on it — the
+# mission cancel, the maintenance insert, and the status flip commit together.
+_LOCK_VEHICLE = """
+SELECT status
+FROM vehicles
+WHERE vehicle_id = %(vehicle_id)s
+FOR UPDATE
+"""
+
+# Cancel the (at most one) active mission for the vehicle, capturing its id.
+_CANCEL_ACTIVE_MISSION = """
+UPDATE missions
+SET status = 'cancelled'
+WHERE vehicle_id = %(vehicle_id)s AND status = 'active'
+RETURNING mission_id
+"""
+
+# Open a maintenance record. ON CONFLICT DO NOTHING against the partial unique
+# index uq_open_maintenance_per_vehicle is the declarative idempotency backstop.
+_INSERT_MAINTENANCE = """
+INSERT INTO maintenance_records (vehicle_id, mission_id, reason)
+VALUES (%(vehicle_id)s, %(mission_id)s, %(reason)s)
+ON CONFLICT DO NOTHING
+"""
+
+_SET_VEHICLE_FAULT = """
+UPDATE vehicles
+SET status = 'fault', updated_at = now()
+WHERE vehicle_id = %(vehicle_id)s
+"""
+
+# Guarded non-fault status update. A single UPDATE keyed on the (existing)
+# vehicle row; rowcount tells the caller whether a row matched, so a missing
+# vehicle is a clean "no row updated" rather than a silent success.
+_SET_VEHICLE_STATUS = """
+UPDATE vehicles
+SET status = %(status)s, updated_at = now()
+WHERE vehicle_id = %(vehicle_id)s
+"""
+
 _ZONE_COUNTS = """
 SELECT zone_id, entry_count
 FROM zone_counts
@@ -263,6 +304,74 @@ def recent_anomalies(
             }
             for row in conn.execute(_RECENT_ANOMALIES, params).fetchall()
         ]
+
+
+def transition_to_fault(vehicle_id: str, reason: str | None = None) -> bool:
+    """Atomically transition a vehicle to ``fault``, cancelling its active mission.
+
+    Runs as one ``conn.transaction()`` that first takes a pessimistic row lock on
+    the authoritative ``vehicles`` row (``SELECT status ... FOR UPDATE``), per the
+    telemetry-architecture standard and ADR D6. Locking serializes *all* fault
+    handling for that vehicle, so concurrent fault events cannot interleave.
+
+    Idempotent via two layers, to tolerate at-least-once delivery and concurrency:
+
+    - *Transition guard (primary):* under the lock, if the vehicle is already in
+      ``fault`` the handler short-circuits and returns ``False`` — no mission is
+      cancelled and no maintenance record is written. The second of two
+      concurrent/duplicate transitions always observes ``fault`` and no-ops.
+    - *Uniqueness backstop (declarative):* the maintenance insert uses
+      ``ON CONFLICT DO NOTHING`` against the partial unique index
+      ``uq_open_maintenance_per_vehicle``, so at most one open record per vehicle
+      exists even if a write reached the insert twice.
+
+    On a real transition it cancels the active mission (if any), opens one
+    maintenance record, flips ``status`` to ``fault``, and returns ``True``.
+    Raises ``LookupError`` if the vehicle row does not exist (existence is a
+    precondition; auto-registration is out of scope).
+    """
+    with connection() as conn:
+        with conn.transaction():
+            row = conn.execute(_LOCK_VEHICLE, {"vehicle_id": vehicle_id}).fetchone()
+            if row is None:
+                raise LookupError(f"unknown vehicle: {vehicle_id}")
+            if row[0] == "fault":
+                return False
+
+            cancelled = conn.execute(
+                _CANCEL_ACTIVE_MISSION, {"vehicle_id": vehicle_id}
+            ).fetchone()
+            mission_id = cancelled[0] if cancelled is not None else None
+
+            conn.execute(
+                _INSERT_MAINTENANCE,
+                {
+                    "vehicle_id": vehicle_id,
+                    "mission_id": mission_id,
+                    "reason": reason,
+                },
+            )
+            conn.execute(_SET_VEHICLE_FAULT, {"vehicle_id": vehicle_id})
+            return True
+
+
+def set_vehicle_status(vehicle_id: str, status: str) -> bool:
+    """Set a vehicle's status with a single guarded UPDATE (non-fault path).
+
+    The fault transition has its own row-locked, idempotent handler
+    (``transition_to_fault``); this is the thin path for the non-fault statuses
+    (``idle`` / ``moving`` / ``charging``), where a vehicle is simply a row whose
+    status flips. Returns ``True`` when a row matched and was updated, ``False``
+    when the vehicle does not exist — letting the route map a missing vehicle to
+    ``404`` rather than reporting a silent success.
+    """
+    with connection() as conn:
+        with conn.transaction():
+            result = conn.execute(
+                _SET_VEHICLE_STATUS,
+                {"vehicle_id": vehicle_id, "status": status},
+            )
+            return result.rowcount > 0
 
 
 def detect_comms_loss(now: datetime) -> int:

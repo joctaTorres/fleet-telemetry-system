@@ -36,6 +36,21 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class VehicleStatusUpdate(BaseModel):
+    """A request to set a vehicle's authoritative status.
+
+    The status-update write route validates the body into this model first, so a
+    schema-invalid request (unknown status, unknown field) is rejected with 422
+    before the handler runs and nothing is written. ``reason`` is carried through
+    to the maintenance record on a transition to ``fault``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    status: VehicleStatus
+    reason: str | None = None
+
+
 class TelemetryEvent(BaseModel):
     """A single validated telemetry reading emitted by a vehicle."""
 
