@@ -1,0 +1,168 @@
+# Batch manifest — declarative intent for a multi-change effort.
+#
+# A batch coordinates related changes across ordered phases. It references
+# changes by NAME and never owns them: changes live under .ratchet/changes/
+# like any other change and can be inspected, validated, and archived on their
+# own. Status is derived live from change state on disk — never stored here.
+#
+# Phases ship functional software behind an executable proof-of-work, so errors
+# surface early. A later phase is blocked until the prior phase's proof-of-work
+# passes. Changes are created lazily as the batch progresses: an entry with no
+# change directory yet is simply "pending", not an error.
+#
+# Architecture of record: docs/ADR.md (ADR-0001). CDC-over-WAL → Redis → WS,
+# primary/replica split, two APIs. Infra is introduced LAZILY: phases 1–4 run
+# against a single Postgres and are exercised end-to-end over REST; the read
+# replica + CDC consumer + Redis arrive in phase 5 where the WebSocket path
+# actually needs them. Proofs assume Docker Compose / testcontainers, so the
+# concurrency-correctness claims are tested against a real Postgres.
+
+name: fleet-telemetry-service
+created: 2026-06-16
+
+phases:
+  # ── PHASE 1 ────────────────────────────────────────────────────────────────
+  # Concrete proof + decomposed change intents (this phase is built first).
+  - name: ingest-and-fleet-state
+    goal: >
+      A vehicle (HTTP client) can POST a telemetry event to the stateless
+      ingestion API, have it validated and persisted to Postgres, and read the
+      current aggregate fleet state (per-status counts) back over REST. Single
+      Postgres; no replica/CDC/Redis yet.
+    success: >
+      POST /telemetry validates the event schema and upserts the vehicle's
+      current state plus appends the raw event. GET /fleet/state returns
+      per-status counts (idle|moving|charging|fault) across all distinct
+      vehicles, computed by GROUP BY over vehicle_current_state, internally
+      consistent under MVCC and safe under concurrent writes.
+    proofOfWork:
+      kind: integration
+      run: docker compose -f docker-compose.test.yml run --rm api pytest tests/integration/test_ingest_fleet_state.py
+      pass: >
+        exit code 0 — test concurrently POSTs telemetry for 50 distinct
+        vehicles across mixed statuses, then asserts GET /fleet/state returns
+        per-status counts that sum to 50 and exactly match the last event per
+        vehicle (no lost or double-counted upserts).
+    changes:
+      - name: telemetry-persistence
+        # Root: Postgres schema (raw_events, vehicle_current_state) + the
+        # idempotent upsert write path (INSERT ... ON CONFLICT DO UPDATE).
+      - name: ingestion-post-endpoint
+        # Stateless POST /telemetry: validate payload → call persistence.
+        after: [telemetry-persistence]
+      - name: fleet-state-endpoint
+        # GET /fleet/state: SELECT status, COUNT(*) ... GROUP BY status.
+        after: [telemetry-persistence]
+
+  # ── PHASE 2 ────────────────────────────────────────────────────────────────
+  # Described proof (kind fixed now; exact command refined at phase entry).
+  - name: zone-traversal-counter
+    goal: >
+      When a telemetry event carries a non-null zone_entered, that zone's
+      entry_count is incremented atomically so that under a burst of concurrent
+      entries to the same zone (shift-change convergence) every entry is
+      counted. Per-zone counts are exposed at GET /zones/counts. ~20 zones are a
+      hardcoded startup constant.
+    success: >
+      Increments use a single server-side UPDATE ... SET entry_count =
+      entry_count + 1 WHERE zone_id = $1 (row-locked read-modify-write inside
+      Postgres); the rejected application-level SELECT-then-UPDATE is NOT used.
+      GET /zones/counts returns the live per-zone totals.
+    proofOfWork:
+      kind: integration
+      run: "refined at phase entry — testcontainers Postgres, N concurrent POSTs with the same zone_entered"
+      pass: >
+        After firing N concurrent zone_entered events for one zone, that zone's
+        entry_count equals exactly N (zero lost increments). Events with
+        zone_entered=null leave all counts unchanged.
+    changes: []
+
+  # ── PHASE 3 ────────────────────────────────────────────────────────────────
+  - name: anomaly-detection-and-query
+    goal: >
+      Anomalies are detected synchronously inside the ingest transaction and
+      written to an anomalies table; recent anomalies are queryable over REST,
+      filtered by vehicle and time range.
+    success: >
+      Detection covers the agreed default rules — stateless: status=fault,
+      non-empty error_codes, battery_pct<15 while status!=charging, speed_mps>5;
+      stateful (vs the previous persisted reading): stuck (status=moving &
+      speed<0.1 for ≥10s), teleport (implied speed >15 m/s between consecutive
+      events), battery rising while not charging; by-absence watchdog: no event
+      from a vehicle for >5s = comms loss. GET /anomalies filters by vehicle_id
+      and a [since, until] time range as an indexed read.
+    proofOfWork:
+      kind: integration
+      run: "refined at phase entry — testcontainers Postgres; post events crossing each threshold + a comms-loss gap"
+      pass: >
+        Each default anomaly class fires exactly when its threshold is crossed
+        and not otherwise; GET /anomalies returns the matching rows for a given
+        vehicle within the requested time window and excludes those outside it.
+    changes: []
+
+  # ── PHASE 4 ────────────────────────────────────────────────────────────────
+  - name: fault-transition
+    goal: >
+      A vehicle status-update operation that, on transition to fault, atomically
+      cancels the vehicle's active mission and creates a maintenance record —
+      correct under concurrent and at-least-once delivery.
+    success: >
+      The transition runs as one transaction holding SELECT 1 FROM vehicles
+      WHERE vehicle_id=$1 FOR UPDATE, then cancels the active mission, inserts a
+      maintenance record, and sets status=fault. Idempotent via a transition
+      guard plus a uniqueness constraint, so concurrent/duplicate fault events
+      cannot double-cancel or create duplicate maintenance records.
+    proofOfWork:
+      kind: integration
+      run: "refined at phase entry — testcontainers Postgres; fire concurrent + duplicate fault events for one vehicle"
+      pass: >
+        After concurrent and duplicate fault transitions for the same vehicle,
+        exactly one mission is cancelled and exactly one maintenance record
+        exists; the vehicle ends in status=fault.
+    changes: []
+
+  # ── PHASE 5 ────────────────────────────────────────────────────────────────
+  # Infra arrives here: read replica + CDC consumer + Redis + frontend API.
+  - name: realtime-cdc-websocket
+    goal: >
+      Committed changes propagate to a frontend API and out over WebSocket with
+      sub-second latency, derived from the WAL (no dual-write). Introduces the
+      read replica, the singleton CDC consumer tailing the logical slot, Redis
+      pub/sub fan-out, and the stateful frontend API (REST snapshot on connect,
+      then WS deltas).
+    success: >
+      The CDC consumer translates the three watched tables into
+      vehicle_state_changed, anomaly_detected, and zone_count_changed events,
+      publishes to Redis; a frontend API instance serves a one-shot REST
+      snapshot from the replica on connect and then streams individual state
+      patches over WebSocket. The ingestion API never touches Redis.
+    proofOfWork:
+      kind: blackbox
+      run: "refined at phase entry — docker compose full topology; POST an event, observe the WS delta via a test WS client"
+      pass: >
+        After POSTing a fault/zone-entry to the ingestion API, a connected
+        WebSocket client receives the corresponding state-patch event
+        (vehicle_state_changed / anomaly_detected / zone_count_changed) within
+        a sub-second bound, with no event emitted for an uncommitted write.
+    changes: []
+
+  # ── PHASE 6 ────────────────────────────────────────────────────────────────
+  - name: react-dashboard
+    goal: >
+      A small React + TypeScript dashboard a floor manager exercises live: a
+      list of the 50 vehicles with current status + battery, the most recent
+      anomaly per vehicle, and per-zone entry counts — all updating live from
+      granular WebSocket patches (no full-list re-render, no polling).
+    success: >
+      On load the dashboard renders the REST snapshot, then applies individual
+      WS patches to update only the affected vehicle/zone. A fault or anomaly
+      surfaces immediately (not at a poll interval). Per-zone counts tick live.
+    proofOfWork:
+      kind: llm-judge
+      run: "refined at phase entry — Playwright drives the UI while events are injected; judge inspects DOM/screenshots"
+      pass: >
+        After a fault is injected, the corresponding vehicle's row updates its
+        status/battery and surfaces the anomaly without a full re-render or page
+        refresh, and the relevant zone count increments live — judged against
+        the captured DOM/screenshot sequence.
+    changes: []

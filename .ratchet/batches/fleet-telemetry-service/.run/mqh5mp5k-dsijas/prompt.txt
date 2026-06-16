@@ -1,0 +1,25 @@
+You are advancing the ratchet batch "fleet-telemetry-service".
+Perform EXACTLY ONE transition: APPLY for change "telemetry-persistence".
+You MUST finish by running `ratchet batch report fleet-telemetry-service --change telemetry-persistence --complete "<summary>"` — without it this step is treated as unreported and parked.
+
+Active phase: ingest-and-fleet-state
+Phase goal: A vehicle (HTTP client) can POST a telemetry event to the stateless ingestion API, have it validated and persisted to Postgres, and read the current aggregate fleet state (per-status counts) back over REST. Single Postgres; no replica/CDC/Redis yet.
+
+Phase success criteria: POST /telemetry validates the event schema and upserts the vehicle's current state plus appends the raw event. GET /fleet/state returns per-status counts (idle|moving|charging|fault) across all distinct vehicles, computed by GROUP BY over vehicle_current_state, internally consistent under MVCC and safe under concurrent writes.
+
+Phase proof-of-work (integration): run `docker compose -f docker-compose.test.yml run --rm api pytest tests/integration/test_ingest_fleet_state.py`, passes when exit code 0 — test concurrently POSTs telemetry for 50 distinct vehicles across mixed statuses, then asserts GET /fleet/state returns per-status counts that sum to 50 and exactly match the last event per vehicle (no lost or double-counted upserts).
+
+
+Implement the planned tasks for change "telemetry-persistence".
+Work through the "## Tasks" checklist in
+".ratchet/changes/telemetry-persistence/plan.md", editing the source as needed
+and checking off each "- [ ]" box (to "- [x]") as you complete it. Do NOT
+re-propose or change the plan scope.
+
+Communicate ONLY by running these shell commands (do not prompt interactively):
+  ratchet batch report fleet-telemetry-service --change telemetry-persistence --status "<progress note>"
+  ratchet batch report fleet-telemetry-service --change telemetry-persistence --blocker "<question you need answered>"
+  ratchet batch report fleet-telemetry-service --change telemetry-persistence --needs-input "<what you need>"
+  ratchet batch report fleet-telemetry-service --change telemetry-persistence --complete "<summary of what you did>"
+Raise a blocker instead of guessing when a decision is required.
+Post a completion ONLY when this single transition is genuinely finished.
