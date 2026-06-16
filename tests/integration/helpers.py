@@ -43,3 +43,14 @@ def zone_count(zone_id: str) -> int:
             (zone_id,),
         ).fetchone()
     return row[0]
+
+
+def anomaly_types(vehicle_id: str) -> list[str]:
+    """Return the anomaly_type values recorded for a vehicle, time-ordered."""
+    with psycopg.connect(get_dsn()) as conn:
+        rows = conn.execute(
+            "SELECT anomaly_type FROM anomalies WHERE vehicle_id = %s "
+            "ORDER BY detected_at, id",
+            (vehicle_id,),
+        ).fetchall()
+    return [r[0] for r in rows]

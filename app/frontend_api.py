@@ -2,10 +2,10 @@
 
 A dedicated FastAPI application — kept separate from the stateless ingestion API
 per the telemetry-architecture standard ("two separate APIs, do not merge them")
-— exposing the read surface the dashboard needs: ``GET /fleet/state`` and
-``GET /zones/counts``. Each route derives its result fresh from the database on
-every request; the app holds no authoritative in-process counter that could
-diverge from committed state.
+— exposing the read surface the dashboard needs: ``GET /fleet/state``,
+``GET /zones/counts`` and ``GET /anomalies``. Each route derives its result fresh
+from the database on every request; the app holds no authoritative in-process
+counter that could diverge from committed state.
 
 Scoped deviation: the standard serves REST reads from a streaming read replica.
 This phase is explicitly scoped to a single Postgres (no replica/CDC/Redis yet),
@@ -17,9 +17,11 @@ replica.
 
 from __future__ import annotations
 
-from fastapi import FastAPI
+from datetime import datetime
 
-from .persistence import aggregate_fleet_state, zone_entry_counts
+from fastapi import FastAPI, Query
+
+from .persistence import aggregate_fleet_state, recent_anomalies, zone_entry_counts
 
 app = FastAPI(title="Fleet Telemetry Frontend API")
 
@@ -49,3 +51,24 @@ def get_zone_counts() -> dict[str, int]:
     ``0``.
     """
     return zone_entry_counts()
+
+
+@app.get("/anomalies")
+def get_anomalies(
+    vehicle_id: str = Query(..., min_length=1),
+    since: datetime = Query(...),
+    until: datetime = Query(...),
+) -> list[dict]:
+    """Return one vehicle's anomalies within an inclusive ``[since, until]`` range.
+
+    Thin adapter over the existing ``recent_anomalies(vehicle_id, since, until)``
+    read seam — a single indexed range scan over the ``(vehicle_id, detected_at)``
+    composite index, ordered by ``detected_at``. ``vehicle_id`` is required;
+    ``since`` and ``until`` are ISO-8601 timestamps and the bounds are inclusive
+    on both ends. Returns 200 OK with a JSON list of anomaly objects
+    (``vehicle_id``, ``anomaly_type``, ``detail``, ``detected_at``); a vehicle
+    with no matching anomalies returns an empty list. Like the other frontend
+    reads, the result is derived fresh from the database, so the app holds no
+    authoritative in-process state.
+    """
+    return recent_anomalies(vehicle_id, since, until)
