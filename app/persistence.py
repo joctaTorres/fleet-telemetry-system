@@ -28,19 +28,34 @@ SET status      = EXCLUDED.status,
     updated_at  = now()
 """
 
+# Advance one zone's counter with a single server-side, row-locked
+# read-modify-write. No application-level SELECT-then-UPDATE, which would lose
+# updates under a burst of concurrent entries to the same zone.
+_INCREMENT_ZONE = """
+UPDATE zone_counts
+SET entry_count = entry_count + 1
+WHERE zone_id = %(zone_id)s
+"""
+
 _AGGREGATE = """
 SELECT status, COUNT(*) AS n
 FROM vehicle_current_state
 GROUP BY status
 """
 
+_ZONE_COUNTS = """
+SELECT zone_id, entry_count
+FROM zone_counts
+"""
+
 
 def persist_telemetry(event: TelemetryEvent) -> None:
     """Append the raw event and upsert the vehicle's current state atomically.
 
-    Both writes happen in one transaction, so a committed event is reflected in
-    both ``raw_events`` and ``vehicle_current_state`` — or, on any failure,
-    neither.
+    All writes happen in one transaction, so a committed event is reflected in
+    ``raw_events``, ``vehicle_current_state``, and — when ``zone_entered`` is
+    non-null — the ``zone_counts`` increment together, or, on any failure, none
+    of them. When ``zone_entered`` is null no counter statement runs.
     """
     params = {
         "vehicle_id": event.vehicle_id,
@@ -52,6 +67,8 @@ def persist_telemetry(event: TelemetryEvent) -> None:
         with conn.transaction():
             conn.execute(_INSERT_RAW, params)
             conn.execute(_UPSERT_CURRENT, params)
+            if event.zone_entered is not None:
+                conn.execute(_INCREMENT_ZONE, {"zone_id": event.zone_entered})
 
 
 def aggregate_fleet_state() -> dict[str, int]:
@@ -66,3 +83,18 @@ def aggregate_fleet_state() -> dict[str, int]:
         for status, n in conn.execute(_AGGREGATE).fetchall():
             counts[status] = n
     return counts
+
+
+def zone_entry_counts() -> dict[str, int]:
+    """Return the live per-zone entry totals for all seeded zones.
+
+    A single ``SELECT zone_id, entry_count FROM zone_counts`` read in one MVCC
+    snapshot. Because the seed guarantees a row per known zone, this always
+    reports all ~20 zones — never-entered zones report ``0``. The follow-on
+    ``GET /zones/counts`` change consumes this read seam unchanged.
+    """
+    with connection() as conn:
+        return {
+            zone_id: entry_count
+            for zone_id, entry_count in conn.execute(_ZONE_COUNTS).fetchall()
+        }

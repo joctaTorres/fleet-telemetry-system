@@ -41,8 +41,14 @@ def _migrated_db():
 
 @pytest.fixture(autouse=True)
 def _clean_tables():
-    """Empty both tables before each test for isolation."""
+    """Reset event tables and zone counters before each test for isolation.
+
+    ``raw_events`` and ``vehicle_current_state`` are truncated; ``zone_counts``
+    keeps its seeded rows (one per known zone) but every counter is reset to 0,
+    so each test starts from a freshly-seeded baseline.
+    """
     with psycopg.connect(get_dsn()) as conn:
         conn.execute("TRUNCATE raw_events, vehicle_current_state")
+        conn.execute("UPDATE zone_counts SET entry_count = 0")
         conn.commit()
     yield

@@ -10,8 +10,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from .db import connection
+from .models import ZONES
 
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+
+# Idempotent: re-runs never duplicate a row (zone_id is the primary key) and
+# never reset or lose an existing entry_count.
+_SEED_ZONE = """
+INSERT INTO zone_counts (zone_id, entry_count)
+VALUES (%(zone_id)s, 0)
+ON CONFLICT (zone_id) DO NOTHING
+"""
 
 _ENSURE_TABLE = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -43,7 +52,23 @@ def run_migrations() -> list[str]:
                     (version,),
                 )
                 applied.append(version)
+    seed_zones()
     return applied
+
+
+def seed_zones() -> None:
+    """Seed one ``zone_counts`` row per known zone, idempotently.
+
+    Inserts a row at ``entry_count = 0`` for every id in
+    :data:`app.models.ZONES`, skipping any zone already present
+    (``ON CONFLICT (zone_id) DO NOTHING``). Safe to run repeatedly: re-runs
+    never duplicate a row or reset a live count, so a read of per-zone counts
+    always reports all ~20 zones.
+    """
+    with connection() as conn:
+        with conn.transaction():
+            for zone_id in ZONES:
+                conn.execute(_SEED_ZONE, {"zone_id": zone_id})
 
 
 if __name__ == "__main__":  # pragma: no cover - manual / container entrypoint

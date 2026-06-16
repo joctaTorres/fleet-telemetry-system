@@ -33,3 +33,13 @@ def current_state_row_count(vehicle_id: str) -> int:
             (vehicle_id,),
         ).fetchone()
     return row[0]
+
+
+def zone_count(zone_id: str) -> int:
+    """Return the live entry_count for a single zone."""
+    with psycopg.connect(get_dsn()) as conn:
+        row = conn.execute(
+            "SELECT entry_count FROM zone_counts WHERE zone_id = %s",
+            (zone_id,),
+        ).fetchone()
+    return row[0]
