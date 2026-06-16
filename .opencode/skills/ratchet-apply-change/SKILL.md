@@ -1,0 +1,176 @@
+---
+name: ratchet-apply-change
+description: Implement tasks from a Ratchet change. Use when the user wants to start implementing, continue implementation, or work through tasks against the change features and plan.
+license: MIT
+compatibility: Requires ratchet CLI.
+metadata:
+  author: ratchet
+  version: "1.0"
+  generatedBy: "0.1.0"
+---
+
+Implement tasks from a Ratchet change.
+
+**Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
+
+**Steps**
+
+1. **Select the change**
+
+   If a name is provided, use it. Otherwise:
+   - Infer from conversation context if the user mentioned a change
+   - Auto-select if only one active change exists
+   - If ambiguous, run `ratchet list --json` to get available changes and use the **AskUserQuestion tool** to let the user select
+
+   Always announce: "Using change: <name>" and how to override (e.g., `/rct-apply <other>`).
+
+2. **Check status to understand the schema**
+   ```bash
+   ratchet status --change "<name>" --json
+   ```
+   Parse the JSON to understand:
+   - `schemaName`: The workflow being used (the built-in schema is "ratchet")
+   - `planningHome`, `changeRoot`, and `actionContext`: planning scope and edit constraints
+   - The tasks live in `plan.md` under `## Tasks` (the schema's `apply.tracks` file)
+
+3. **Get apply instructions**
+
+   ```bash
+   ratchet instructions apply --change "<name>" --json
+   ```
+
+   This returns:
+   - `contextFiles`: artifact ID -> array of concrete file paths (for the ratchet schema: the `features/**/*.feature` files and `plan.md`)
+   - Progress (total, complete, remaining)
+   - Task list with status
+   - Dynamic instruction based on current state
+
+   **Handle states:**
+   - If `state: "blocked"` (missing artifacts): show message, suggest using ratchet-propose
+   - If `state: "all_done"`: congratulate, suggest archive
+   - Otherwise: proceed to implementation
+
+   **Workspace guard:** If status JSON reports `actionContext.mode: "workspace-planning"` and `allowedEditRoots` is empty, explain that full workspace apply is not supported in this slice. Treat linked repos and folders as read-only context, ask the user to select an affected area through an explicit implementation workflow, and STOP before editing files.
+
+4. **Read context files**
+
+   Read every file path listed under `contextFiles` from the apply instructions output.
+   For the ratchet schema these are:
+   - **features/**/*.feature**: each Scenario's Given/When/Then is the behavior contract to implement against
+   - **plan.md**: the ## Why / ## What Changes / ## Design context plus the ## Tasks checklist
+
+5. **Show current progress**
+
+   Display:
+   - Schema being used
+   - Progress: "N/M tasks complete"
+   - Remaining tasks overview
+   - Dynamic instruction from CLI
+
+6. **Implement tasks (loop until done or blocked)**
+
+   For each pending task:
+   - Show which task is being worked on
+   - Implement so each related Scenario's Given/When/Then holds true
+   - Keep changes minimal and focused
+   - Mark task complete in `plan.md` under `## Tasks`: `- [ ]` → `- [x]`
+   - Continue to next task
+
+   **Pause if:**
+   - Task is unclear → ask for clarification
+   - Implementation reveals a design issue → suggest updating artifacts
+   - Error or blocker encountered → report and wait for guidance
+   - User interrupts
+
+7. **On completion or pause, show status**
+
+   Display:
+   - Tasks completed this session
+   - Overall progress: "N/M tasks complete"
+   - If all done: suggest archive
+   - If paused: explain why and wait for guidance
+
+8. **Write the build log (mandatory last step — enforces the `ai-build-logging` standard)**
+
+   AFTER the implementation work in steps 6–7 has completed (never before, never
+   instead of it), as the final action of this skill:
+
+   - Write a markdown report to `docs/ai-build-logs/<session-id>-<short-name>.md`
+     containing, at minimum: the session id, the session name, the step (`apply`),
+     the change name, and a brief of what was implemented this session and the
+     outcome.
+   - Then append exactly one line for this session to `docs/ai-build-logs/index.md`
+     capturing the session id, the session name, and a one-line session brief. This
+     is append-only — never overwrite or reorder existing entries.
+
+   This step is not optional. Writing the report without the index append (or the
+   index append without the report) does NOT satisfy the standard.
+
+**Output During Implementation**
+
+```
+## Implementing: <change-name> (schema: <schema-name>)
+
+Working on task 3/7: <task description>
+[...implementation happening...]
+✓ Task complete
+
+Working on task 4/7: <task description>
+[...implementation happening...]
+✓ Task complete
+```
+
+**Output On Completion**
+
+```
+## Implementation Complete
+
+**Change:** <change-name>
+**Schema:** <schema-name>
+**Progress:** 7/7 tasks complete ✓
+
+### Completed This Session
+- [x] Task 1
+- [x] Task 2
+...
+
+All tasks complete! Ready to archive this change.
+```
+
+**Output On Pause (Issue Encountered)**
+
+```
+## Implementation Paused
+
+**Change:** <change-name>
+**Schema:** <schema-name>
+**Progress:** 4/7 tasks complete
+
+### Issue Encountered
+<description of the issue>
+
+**Options:**
+1. <option 1>
+2. <option 2>
+3. Other approach
+
+What would you like to do?
+```
+
+**Guardrails**
+- Keep going through tasks until done or blocked
+- Always read context files before starting (from the apply instructions output)
+- If task is ambiguous, pause and ask before implementing
+- If implementation reveals issues, pause and suggest artifact updates
+- Keep code changes minimal and scoped to each task
+- Update task checkbox immediately after completing each task
+- Pause on errors, blockers, or unclear requirements - don't guess
+- Use contextFiles from CLI output, don't assume specific file names
+- As the mandatory last step (after the work completes), write a markdown report to `docs/ai-build-logs/*.md` and append the session (id, name, brief) to `docs/ai-build-logs/index.md` — per the `ai-build-logging` standard
+
+**Fluid Workflow Integration**
+
+This skill supports the "actions on a change" model:
+
+- **Can be invoked anytime**: Before all artifacts are done (if tasks exist), after partial implementation, interleaved with other actions
+- **Allows artifact updates**: If implementation reveals design issues, suggest updating artifacts - not phase-locked, work fluidly

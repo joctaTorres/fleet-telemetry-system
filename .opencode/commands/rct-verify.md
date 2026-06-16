@@ -1,0 +1,173 @@
+---
+description: Verify implementation matches change artifacts before archiving
+---
+
+Verify that an implementation matches the change artifacts: the Gherkin features and the plan.
+
+**Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
+
+**Steps**
+
+1. **If no change name provided, prompt for selection**
+
+   Run `ratchet list --json` to get available changes. Ask the user to select one — use a structured-question tool such as AskUserQuestion if your agent has one, otherwise ask in plain prose.
+
+   Mark changes with incomplete tasks as "(In Progress)".
+
+   **IMPORTANT**: Do NOT guess or auto-select a change. Always let the user choose.
+
+2. **Check status to understand the schema**
+   ```bash
+   ratchet status --change "<name>" --json
+   ```
+   Parse the JSON to understand:
+   - `schemaName`: The workflow being used (the built-in schema is "ratchet")
+   - `planningHome`, `changeRoot`, `artifactPaths`, and `actionContext`: path and scope context
+   - Which artifacts exist for this change (`features`, `plan`)
+
+   If status reports `actionContext.mode: "workspace-planning"`, explain that full workspace implementation verification is not supported in this slice and STOP. Do not infer repo-local implementation ownership or edit linked repos.
+
+3. **Load artifacts**
+
+   ```bash
+   ratchet instructions apply --change "<name>" --json
+   ```
+
+   This returns the change directory and `contextFiles` (artifact ID -> array of concrete file paths). For the ratchet schema these are the `features/**/*.feature` files and `plan.md`. Read all of them.
+
+4. **Load the standards the change declared**
+
+   Standards are a project-level library at `.ratchet/standards/`, a sibling of
+   `.ratchet/changes/`. The change directory paths from step 3 contain
+   `.../.ratchet/changes/<name>/...`, so the standards live at the sibling
+   `.../.ratchet/standards/`. Each standard file carries a `tag` in its frontmatter
+   (falling back to the file-name stem when absent).
+
+   Read the change's `.ratchet.yaml` `standards` list — these are the tags the change
+   was proposed under. Scope this verification to exactly those standards:
+   - If `standards` lists one or more tags, read only the matching `*.md` files and
+     check the implementation against them. Do NOT require standards the change never
+     declared.
+   - If `standards` is absent or empty, fall back to reading every `*.md` file in
+     `.ratchet/standards/` (preserving today's behavior).
+   - If there are no standards to check at all, skip the Standards dimension below.
+
+5. **Initialize verification report structure**
+
+   Create a report structure with four dimensions:
+   - **Completeness**: every `## Tasks` checkbox in plan.md is checked; every feature file is accounted for
+   - **Correctness**: every Scenario's Given/When/Then is satisfied by the implementation
+   - **Coherence**: the implementation follows the `## Design` decisions in plan.md and project patterns
+   - **Standards**: the implementation honors each standard the change declared (step 4)
+
+   Each dimension can have CRITICAL, WARNING, or SUGGESTION issues.
+
+6. **Verify Completeness**
+
+   **Task Completion**:
+   - Read `plan.md` and parse the `## Tasks` checkboxes: `- [ ]` (incomplete) vs `- [x]` (complete)
+   - Count complete vs total tasks
+   - If incomplete tasks exist:
+     - Add CRITICAL issue for each incomplete task
+     - Recommendation: "Complete task: <description>" or "Mark as done if already implemented"
+
+   **Feature Coverage**:
+   - For each `features/**/*.feature` file, confirm the described capability exists in the codebase
+   - If a feature appears unimplemented:
+     - Add CRITICAL issue: "Feature not found: <feature name>"
+     - Recommendation: "Implement the behavior described in <feature path>"
+
+7. **Verify Correctness (Scenario by Scenario)**
+
+   For each Scenario in each feature file:
+   - Read the Given/When/Then steps - this is the behavior contract
+   - Search the codebase (and tests) for evidence the scenario holds:
+     - **Given** describes the precondition/setup
+     - **When** describes the action
+     - **Then** describes the expected outcome
+   - If the scenario is satisfied: note the implementing file/line references
+   - If divergence detected:
+     - Add WARNING: "Scenario may not hold: <scenario name> - <details>"
+     - Recommendation: "Review <file>:<lines> against the Then step"
+   - If no implementation or test covers the scenario:
+     - Add WARNING: "Scenario not covered: <scenario name>"
+     - Recommendation: "Add test or implementation for: <Given/When/Then>"
+
+8. **Verify Coherence**
+
+   **Design Adherence**:
+   - Read the `## Design` section of plan.md
+   - Verify the implementation follows those decisions
+   - If a contradiction is detected:
+     - Add WARNING: "Design decision not followed: <decision>"
+     - Recommendation: "Update implementation or revise plan.md ## Design to match reality"
+
+   **Code Pattern Consistency**:
+   - Review new code for consistency with project patterns (naming, structure, style)
+   - If significant deviations found:
+     - Add SUGGESTION: "Code pattern deviation: <details>"
+     - Recommendation: "Consider following project pattern: <example>"
+
+9. **Verify Standards**
+
+   For each standard loaded in step 4:
+   - Read its guidelines (the concrete, checkable rules it enforces)
+   - Check the implementation and tests for evidence each guideline is honored
+   - If a guideline is not met:
+     - Add WARNING (or CRITICAL when the standard is a hard requirement): "Standard not met: <standard> - <guideline>"
+     - Recommendation: "Bring <file>:<lines> in line with <standard> guideline: <guideline>"
+   - If there are no standards, skip this dimension.
+
+10. **Generate Verification Report**
+
+   **Summary Scorecard**:
+   ```
+   ## Verification Report: <change-name>
+
+   ### Summary
+   | Dimension    | Status                 |
+   |--------------|------------------------|
+   | Completeness | X/Y tasks complete     |
+   | Correctness  | M/N scenarios satisfied|
+   | Coherence    | Followed/Issues        |
+   | Standards    | K/L standards met      |
+   ```
+
+   **Issues by Priority**:
+
+   1. **CRITICAL** (Must fix before archive):
+      - Incomplete tasks
+      - Unimplemented features
+      - Each with specific, actionable recommendation
+
+   2. **WARNING** (Should fix):
+      - Scenarios not satisfied or not covered
+      - Design divergences
+      - Each with specific recommendation
+
+   3. **SUGGESTION** (Nice to fix):
+      - Pattern inconsistencies
+      - Minor improvements
+      - Each with specific recommendation
+
+   **Final Assessment**:
+   - If CRITICAL issues: "X critical issue(s) found. Fix before archiving."
+   - If only warnings: "No critical issues. Y warning(s) to consider. Ready for archive (with noted improvements)."
+   - If all clear: "All scenarios satisfied and all tasks checked. Ready for archive."
+
+**Verification Heuristics**
+
+- **Completeness**: Focus on objective checklist items (`## Tasks` checkboxes, feature files present)
+- **Correctness**: Map each Given/When/Then to code and tests; use reasonable inference, don't require perfect certainty
+- **Coherence**: Look for glaring inconsistencies, don't nitpick style
+- **False Positives**: When uncertain, prefer SUGGESTION over WARNING, WARNING over CRITICAL
+- **Actionability**: Every issue must have a specific recommendation with file/line references where applicable
+
+**Output Format**
+
+Use clear markdown with:
+- Table for summary scorecard
+- Grouped lists for issues (CRITICAL/WARNING/SUGGESTION)
+- Code references in format: `file.ts:123`
+- Specific, actionable recommendations
+- No vague suggestions like "consider reviewing"

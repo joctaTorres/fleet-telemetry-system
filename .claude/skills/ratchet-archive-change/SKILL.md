@@ -1,0 +1,103 @@
+---
+name: ratchet-archive-change
+description: Archive a completed change. Use when the user wants to finalize a change: copy its features into the permanent store and move it to the archive.
+license: MIT
+compatibility: Requires ratchet CLI.
+metadata:
+  author: ratchet
+  version: "1.0"
+  generatedBy: "0.1.0"
+---
+
+Archive a completed change. `ratchet archive` copies the change's `features/**` into the permanent `.ratchet/features/` store (whole-file replacement, honoring an optional `features/.deleted` tombstone) and moves the change to `changes/archive/<YYYY-MM-DD>-<name>/`.
+
+**Input**: Optionally specify a change name. If omitted, check if it can be inferred from conversation context. If vague or ambiguous you MUST prompt for available changes.
+
+**Steps**
+
+1. **If no change name provided, prompt for selection**
+
+   Run `ratchet list --json` to get available changes. Use the **AskUserQuestion tool** to let the user select.
+
+   Show only active changes (not already archived).
+
+   **IMPORTANT**: Do NOT guess or auto-select a change. Always let the user choose.
+
+2. **Check artifact and task completion status**
+
+   Run `ratchet status --change "<name>" --json` to check completion.
+
+   Parse the JSON to understand:
+   - `schemaName`: The workflow being used (the built-in schema is "ratchet")
+   - `planningHome`, `changeRoot`, `artifactPaths`, and `actionContext`: path and scope context
+   - `artifacts`: list of artifacts (`features`, `plan`) with their status
+   - The `## Tasks` progress in plan.md
+
+   If status reports `actionContext.mode: "workspace-planning"`, explain that workspace archive is not supported in this slice and STOP.
+
+   **If any artifacts are not `done` or tasks are incomplete:**
+   - Display a warning listing what is incomplete
+   - Use the **AskUserQuestion tool** to confirm the user wants to proceed
+   - Proceed only if the user confirms
+
+3. **(Optional) Remove store features**
+
+   If this change should remove feature files from the permanent store, ensure a
+   `features/.deleted` file lists the store-relative paths to remove (one per
+   line; blank lines and `#` comments are ignored). `ratchet archive` applies
+   these removals as part of the store update.
+
+4. **Run the archive command**
+
+   ```bash
+   ratchet archive "<name>" -y
+   ```
+
+   This single command:
+   - Validates the plan (informative) and the feature files (blocking on ERROR)
+   - Copies each `features/<rel>.feature` into `.ratchet/features/<rel>` (add or overwrite by relative path), and applies `features/.deleted` removals
+   - Moves the change directory to `changes/archive/<YYYY-MM-DD>-<name>/` (the `.ratchet.yaml` moves with it)
+
+   Use `--skip-features` only for doc/tooling/infra changes that should not touch the feature store. Use `--no-validate` only as a last resort (it requires confirmation).
+
+5. **Display summary**
+
+   Report:
+   - Change name and schema
+   - The feature-store changes the command printed (added / overwritten / deleted by capability)
+   - The archive location
+
+**Output On Success**
+
+```
+## Archive Complete
+
+**Change:** <change-name>
+**Schema:** <schema-name>
+**Features:** +N added, ~M overwritten, -K deleted in .ratchet/features/
+**Archived to:** changes/archive/<YYYY-MM-DD>-<change-name>/
+
+All artifacts complete. All tasks complete.
+```
+
+**Output On Error (Archive Exists)**
+
+```
+## Archive Failed
+
+**Change:** <change-name>
+
+An archive with today's date already exists for this change.
+
+**Options:**
+1. Rename the existing archive
+2. Delete the existing archive if it's a duplicate
+3. Wait until a different date to archive
+```
+
+**Guardrails**
+- Always prompt for change selection if not provided
+- Let `ratchet archive` perform the feature-store copy and the move - do NOT `mv` the change yourself
+- Don't block archive on warnings - inform and confirm, then pass `-y`
+- The `.ratchet.yaml` moves with the directory; do not delete it
+- Show a clear summary of the store changes and the archive location
