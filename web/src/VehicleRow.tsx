@@ -25,17 +25,21 @@ export interface VehicleRowProps {
   onRender?: (vehicleId: string) => void;
 }
 
+const LOW_BATTERY_THRESHOLD = 20;
+
 function VehicleRowImpl({ vehicle, anomaly, onRender }: VehicleRowProps) {
   onRender?.(vehicle.vehicle_id);
+  const isLowBattery = vehicle.battery_pct < LOW_BATTERY_THRESHOLD;
   return (
     <li
       role="listitem"
+      className="vehicle-row"
       data-testid={`vehicle-row-${vehicle.vehicle_id}`}
       data-vehicle-id={vehicle.vehicle_id}
     >
       <span className="vehicle-id">{vehicle.vehicle_id}</span>
       <span
-        className="vehicle-status"
+        className={`status-badge status-${vehicle.status}`}
         data-testid={`status-${vehicle.vehicle_id}`}
       >
         {vehicle.status}
@@ -44,11 +48,20 @@ function VehicleRowImpl({ vehicle, anomaly, onRender }: VehicleRowProps) {
         className="vehicle-battery"
         data-testid={`battery-${vehicle.vehicle_id}`}
       >
-        {vehicle.battery_pct}%
+        <progress
+          className={`battery-progress ${isLowBattery ? "low" : ""}`}
+          max={100}
+          value={vehicle.battery_pct}
+          aria-label={`Battery ${vehicle.battery_pct}%`}
+        />
+        <span className="battery-text">{vehicle.battery_pct}%</span>
+        {isLowBattery ? (
+          <span className="low-battery-label">low</span>
+        ) : null}
       </span>
       {anomaly ? (
         <span
-          className="vehicle-anomaly"
+          className="anomaly-badge"
           data-testid={`anomaly-${vehicle.vehicle_id}`}
         >
           {anomaly.anomaly_type}

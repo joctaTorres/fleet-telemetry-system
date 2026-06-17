@@ -82,6 +82,7 @@ function zoneSnapshot(n: number): ZoneCountsSnapshot {
 interface MockTransport {
   transport: Transport;
   emit: (event: PatchEvent) => void;
+  setConnected: (connected: boolean) => void;
   fetchSnapshot: ReturnType<typeof vi.fn>;
   fetchAnomalies: ReturnType<typeof vi.fn>;
   fetchZones: ReturnType<typeof vi.fn>;
@@ -90,6 +91,8 @@ interface MockTransport {
 
 function makeMockTransport(): MockTransport {
   let handler: PatchHandler | null = null;
+  const connectionListeners = new Set<(connected: boolean) => void>();
+  let isConnected = true;
   const fetchSnapshot = vi.fn(async () => vehicleSnapshot(50));
   const fetchAnomalies = vi.fn(async () => anomalySnapshot());
   const fetchZones = vi.fn(async () => zoneSnapshot(20));
@@ -98,6 +101,15 @@ function makeMockTransport(): MockTransport {
       fetchSnapshot,
       fetchAnomalies,
       fetchZones,
+      get readyState() {
+        return isConnected ? 1 : 3;
+      },
+      onConnectionChange(cb) {
+        connectionListeners.add(cb);
+        return () => {
+          connectionListeners.delete(cb);
+        };
+      },
       subscribe(h: PatchHandler) {
         handler = h;
         return () => {
@@ -107,6 +119,10 @@ function makeMockTransport(): MockTransport {
     },
     emit(event: PatchEvent) {
       handler?.(event);
+    },
+    setConnected(value: boolean) {
+      isConnected = value;
+      for (const cb of connectionListeners) cb(value);
     },
     fetchSnapshot,
     fetchAnomalies,
