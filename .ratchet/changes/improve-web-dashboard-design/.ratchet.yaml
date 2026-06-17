@@ -1,0 +1,6 @@
+schema: ratchet
+created: 2026-06-17
+standards:
+  - tech-stack
+  - telemetry-architecture
+  - ai-build-logging
