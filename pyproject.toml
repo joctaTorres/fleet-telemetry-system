@@ -8,6 +8,7 @@ dependencies = [
     "psycopg-pool>=3.2",
     "pydantic>=2.7",
     "fastapi>=0.115",
+    "redis>=8.0.0",
 ]
 
 [dependency-groups]

@@ -10,7 +10,11 @@ table rather than a materialized counter that concurrent writers would race on.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
+
+import psycopg
 
 from .db import connection
 from .models import (
@@ -254,29 +258,38 @@ def persist_telemetry(event: TelemetryEvent) -> None:
                 )
 
 
-def aggregate_fleet_state() -> dict[str, int]:
+#: A connection factory: a no-arg callable returning a connection context
+#: manager. Defaults to the primary ``connection``; the frontend's connect
+#: snapshot passes ``replica_connection`` so reads come from the standby.
+ConnFactory = Callable[[], AbstractContextManager[psycopg.Connection]]
+
+
+def aggregate_fleet_state(conn_factory: ConnFactory = connection) -> dict[str, int]:
     """Return per-status vehicle counts across all distinct vehicles.
 
     Computed by a single ``GROUP BY status`` over ``vehicle_current_state`` in
     one MVCC snapshot, so the counts always sum to the number of distinct
-    vehicles. Statuses with no vehicles are reported as zero.
+    vehicles. Statuses with no vehicles are reported as zero. ``conn_factory``
+    selects the source: the primary by default, the read replica when the
+    frontend builds its connect snapshot.
     """
     counts: dict[str, int] = {status: 0 for status in STATUSES}
-    with connection() as conn:
+    with conn_factory() as conn:
         for status, n in conn.execute(_AGGREGATE).fetchall():
             counts[status] = n
     return counts
 
 
-def zone_entry_counts() -> dict[str, int]:
+def zone_entry_counts(conn_factory: ConnFactory = connection) -> dict[str, int]:
     """Return the live per-zone entry totals for all seeded zones.
 
     A single ``SELECT zone_id, entry_count FROM zone_counts`` read in one MVCC
     snapshot. Because the seed guarantees a row per known zone, this always
     reports all ~20 zones — never-entered zones report ``0``. The follow-on
     ``GET /zones/counts`` change consumes this read seam unchanged.
+    ``conn_factory`` selects primary (default) vs replica, as above.
     """
-    with connection() as conn:
+    with conn_factory() as conn:
         return {
             zone_id: entry_count
             for zone_id, entry_count in conn.execute(_ZONE_COUNTS).fetchall()
@@ -284,17 +297,22 @@ def zone_entry_counts() -> dict[str, int]:
 
 
 def recent_anomalies(
-    vehicle_id: str, since: datetime, until: datetime
+    vehicle_id: str,
+    since: datetime,
+    until: datetime,
+    conn_factory: ConnFactory = connection,
 ) -> list[dict]:
     """Return one vehicle's anomalies within an inclusive ``[since, until]`` range.
 
     A single indexed range scan over the ``(vehicle_id, detected_at)`` composite
     index: filters by ``vehicle_id`` and ``detected_at`` between the bounds
-    (inclusive on both ends), ordered by ``detected_at``. The follow-on
+    (inclusive on both ends), ordered by ``detected_at``. The
     ``GET /anomalies`` endpoint consumes this read seam unchanged.
+    ``conn_factory`` selects primary (default) vs replica, as with the other
+    frontend read seams.
     """
     params = {"vehicle_id": vehicle_id, "since": since, "until": until}
-    with connection() as conn:
+    with conn_factory() as conn:
         return [
             {
                 "vehicle_id": row[0],
