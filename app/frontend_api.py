@@ -3,7 +3,8 @@
 A dedicated FastAPI application — kept separate from the stateless ingestion API
 per the telemetry-architecture standard ("two separate APIs, do not merge them")
 — exposing the read surface the dashboard needs: ``GET /fleet/state``,
-``GET /zones/counts`` and ``GET /anomalies``. Each route derives its result fresh
+``GET /vehicles``, ``GET /vehicles/anomalies/latest``, ``GET /zones/counts`` and
+``GET /anomalies``. Each route derives its result fresh
 from the database on every request; the app holds no authoritative in-process
 counter that could diverge from committed state.
 
@@ -32,7 +33,13 @@ from starlette.concurrency import run_in_threadpool
 from .config import get_redis_url
 from .db import replica_connection
 from .events import EVENT_CHANNEL, SNAPSHOT
-from .persistence import aggregate_fleet_state, recent_anomalies, zone_entry_counts
+from .persistence import (
+    aggregate_fleet_state,
+    current_vehicle_states,
+    latest_anomaly_per_vehicle,
+    recent_anomalies,
+    zone_entry_counts,
+)
 
 
 class ConnectionRegistry:
@@ -166,6 +173,38 @@ def get_fleet_state() -> dict[str, int]:
     primary's write path.
     """
     return aggregate_fleet_state(replica_connection)
+
+
+@app.get("/vehicles")
+def get_vehicles() -> list[dict]:
+    """Return every vehicle's current ``(vehicle_id, status, battery_pct)``.
+
+    Calls the existing ``current_vehicle_states()`` — a single
+    ``SELECT ... FROM vehicle_current_state`` in one MVCC snapshot ordered by
+    ``vehicle_id`` — and returns 200 OK with a JSON list of per-vehicle rows.
+    This is the REST snapshot the dashboard's live list renders from on load,
+    before it switches to the granular ``vehicle_state_changed`` WS patch stream.
+    Read from the replica to isolate this load-time read from the primary's write
+    path, like the other frontend reads.
+    """
+    return current_vehicle_states(replica_connection)
+
+
+@app.get("/vehicles/anomalies/latest")
+def get_latest_anomalies() -> list[dict]:
+    """Return each vehicle's most-recent anomaly: one row per vehicle.
+
+    Thin adapter over the existing ``latest_anomaly_per_vehicle()`` read seam — a
+    single ``SELECT DISTINCT ON (vehicle_id) ... ORDER BY vehicle_id, detected_at
+    DESC`` in one MVCC snapshot. Returns 200 OK with a JSON list of anomaly
+    objects (``vehicle_id``, ``anomaly_type``, ``detail``, ``detected_at``), one
+    per vehicle that has ever had an anomaly; vehicles with none are absent. This
+    is the connect-time anomaly snapshot each dashboard row renders from before it
+    switches to the granular ``anomaly_detected`` WS patch stream. Like the other
+    frontend reads, it is derived fresh from the replica, so the app holds no
+    authoritative in-process state and query load stays off the primary.
+    """
+    return latest_anomaly_per_vehicle(replica_connection)
 
 
 @app.get("/zones/counts")

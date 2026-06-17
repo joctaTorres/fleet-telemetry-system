@@ -95,6 +95,17 @@ WHERE vehicle_id = %(vehicle_id)s
 ORDER BY detected_at
 """
 
+# One latest anomaly per vehicle: DISTINCT ON keeps the first row per vehicle_id
+# under the ORDER BY, so ordering by detected_at DESC within each vehicle yields
+# its most-recent anomaly in a single MVCC snapshot. Vehicles with no anomaly are
+# simply absent. Backs the connect-time anomaly snapshot the dashboard rows seed
+# from (GET /vehicles/anomalies/latest).
+_LATEST_ANOMALY_PER_VEHICLE = """
+SELECT DISTINCT ON (vehicle_id) vehicle_id, anomaly_type, detail, detected_at
+FROM anomalies
+ORDER BY vehicle_id, detected_at DESC
+"""
+
 # Advance one zone's counter with a single server-side, row-locked
 # read-modify-write. No application-level SELECT-then-UPDATE, which would lose
 # updates under a burst of concurrent entries to the same zone.
@@ -154,6 +165,15 @@ WHERE vehicle_id = %(vehicle_id)s
 _ZONE_COUNTS = """
 SELECT zone_id, entry_count
 FROM zone_counts
+"""
+
+# Per-vehicle current state for the dashboard's REST snapshot. One MVCC snapshot
+# over the authoritative current-state table; ordered by vehicle_id so the list
+# renders in a stable order across loads.
+_CURRENT_VEHICLE_STATES = """
+SELECT vehicle_id, status, battery_pct
+FROM vehicle_current_state
+ORDER BY vehicle_id
 """
 
 
@@ -296,6 +316,22 @@ def zone_entry_counts(conn_factory: ConnFactory = connection) -> dict[str, int]:
         }
 
 
+def current_vehicle_states(conn_factory: ConnFactory = connection) -> list[dict]:
+    """Return every vehicle's current ``(vehicle_id, status, battery_pct)``.
+
+    A single ``SELECT ... FROM vehicle_current_state`` read in one MVCC snapshot,
+    ordered by ``vehicle_id`` for a stable render order. This is the per-vehicle
+    REST snapshot the dashboard's live list renders from on load; it mirrors the
+    other frontend read seams (``aggregate_fleet_state`` / ``zone_entry_counts``),
+    and ``conn_factory`` selects primary (default) vs the read replica.
+    """
+    with conn_factory() as conn:
+        return [
+            {"vehicle_id": row[0], "status": row[1], "battery_pct": row[2]}
+            for row in conn.execute(_CURRENT_VEHICLE_STATES).fetchall()
+        ]
+
+
 def recent_anomalies(
     vehicle_id: str,
     since: datetime,
@@ -321,6 +357,32 @@ def recent_anomalies(
                 "detected_at": row[3],
             }
             for row in conn.execute(_RECENT_ANOMALIES, params).fetchall()
+        ]
+
+
+def latest_anomaly_per_vehicle(
+    conn_factory: ConnFactory = connection,
+) -> list[dict]:
+    """Return each vehicle's most-recent anomaly: one row per vehicle_id.
+
+    A single ``SELECT DISTINCT ON (vehicle_id) ... ORDER BY vehicle_id,
+    detected_at DESC`` in one MVCC snapshot — DISTINCT ON keeps the first row per
+    ``vehicle_id`` under that ordering, i.e. its latest anomaly. Vehicles that
+    have never had an anomaly are absent from the result. This is the connect-time
+    anomaly snapshot the dashboard rows render from before switching to the live
+    ``anomaly_detected`` WS patch stream; it mirrors the other frontend read seams
+    (``recent_anomalies`` / ``current_vehicle_states``), and ``conn_factory``
+    selects primary (default) vs the read replica.
+    """
+    with conn_factory() as conn:
+        return [
+            {
+                "vehicle_id": row[0],
+                "anomaly_type": row[1],
+                "detail": row[2],
+                "detected_at": row[3],
+            }
+            for row in conn.execute(_LATEST_ANOMALY_PER_VEHICLE).fetchall()
         ]
 
 
