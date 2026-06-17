@@ -273,7 +273,7 @@ services:
   # Prometheus with the remote-write receiver enabled so Alloy can push
   # OTLP-derived metrics; it also scrapes itself and Alloy (see prometheus.yml).
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.1.0
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --web.enable-remote-write-receiver
@@ -293,7 +293,7 @@ services:
   # traces to Tempo and metrics to Prometheus. The 4318 OTLP/HTTP port and the
   # 12345 UI/metrics port are exposed to the host.
   alloy:
-    image: grafana/alloy:latest
+    image: grafana/alloy:v1.5.1
     command:
       - run
       - --server.http.listen-addr=0.0.0.0:12345
@@ -326,7 +326,7 @@ services:
   # datasources and a file-based dashboard provider are provisioned read-only from
   # docker/grafana/ so everything is preloaded on a clean `docker compose up`.
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.4.0
     environment:
       GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
