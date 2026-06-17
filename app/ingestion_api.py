@@ -45,6 +45,10 @@ _meter = install_observability(app)
 # tests can swap it for an in-memory tracer.
 _tracer = trace.get_tracer(__name__)
 
+# NOTE: FastAPIInstrumentor also auto-emits its own http_server_* series (e.g.
+# http_server_duration / http_server_active_requests); those are deliberately
+# left unused — the dashboards bind to the stable explicit names below instead.
+#
 # Explicit, stable request metrics for the rate / latency / error panels. Names
 # and attributes are fixed here so the downstream "Ingestion API" dashboard binds
 # to them deterministically rather than to auto-emitted metric names. Recorded
