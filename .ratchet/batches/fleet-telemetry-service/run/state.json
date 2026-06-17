@@ -1,3 +1,24 @@
 {
-  "parked": {}
+  "parked": {
+    "cdc-consumer": {
+      "parkedAt": "2026-06-16T23:06:33.921Z",
+      "change": "cdc-consumer",
+      "kind": "blocked",
+      "reason": "Agent exited with code 1 without reporting completion.",
+      "answer": "Prior apply timed out after the implementation was LARGELY WRITTEN. Do NOT rewrite from scratch — inspect what exists on disk first and only fill gaps: app/cdc_consumer.py (uses test_decoding output plugin, parses 'table public.<name>: <OP>: <cols>'), docker/primary-init/10-replication-hba.sh, docker/replica-entrypoint.sh, docker-compose.test.yml (primary wal_level=logical + streaming replica + cdc + redis services), and edits to app/db.py (replica pool/replica_connection), app/persistence.py (read seams take optional conn factory), app/frontend_api.py (snapshot reads from replica), tests/integration/conftest.py. Then: bring up the full topology, run the phase proof 'pytest tests/integration/test_realtime_ws.py', fix any failures, run the full integration suite, check off the 16 plan tasks, write the AI build log, and report completion."
+    },
+    "read-replica-split": {
+      "parkedAt": "2026-06-16T23:57:21.706Z",
+      "change": "read-replica-split",
+      "kind": "blocked",
+      "reason": "Agent exited with code 1 without reporting completion."
+    },
+    "dashboard-anomalies-zones": {
+      "parkedAt": "2026-06-17T01:10:25.901Z",
+      "change": "dashboard-anomalies-zones",
+      "kind": "blocked",
+      "reason": "Agent exited with code 1 without reporting completion.",
+      "answer": "Prior apply COMPLETED THE WORK and the proof already PASSED 14/14 via the official command 'docker compose -f docker-compose.test.yml run --rm web npm run test:ui' — it only timed out on a trailing backend sanity-check before finalizing. Do NOT rewrite anything. Just finalize: run the proof ONCE to reconfirm green (rebuild the web image if needed so new files are baked in), then check off the 14 plan tasks, write the AI build log + index line, and report completion. Keep it to a single proof run to stay in-window."
+    }
+  }
 }

@@ -70,12 +70,24 @@ phases:
       GET /zones/counts returns the live per-zone totals.
     proofOfWork:
       kind: integration
-      run: "refined at phase entry — testcontainers Postgres, N concurrent POSTs with the same zone_entered"
+      run: docker compose -f docker-compose.test.yml run --rm api pytest tests/integration/test_zone_counts.py
       pass: >
-        After firing N concurrent zone_entered events for one zone, that zone's
-        entry_count equals exactly N (zero lost increments). Events with
-        zone_entered=null leave all counts unchanged.
-    changes: []
+        exit code 0 — after firing N concurrent zone_entered events for one
+        zone, that zone's entry_count equals exactly N (zero lost increments);
+        events with zone_entered=null leave all counts unchanged; GET
+        /zones/counts returns all ~20 seeded zones.
+    # Decomposed at phase entry (2026-06-16) from phase-1's real shape: a
+    # persistence root that adds zone_counts + the atomic increment in the
+    # existing persist_telemetry path, then a read endpoint on the frontend API.
+    changes:
+      - name: zone-counts-increment
+        # Root: migration for zone_counts (PK zone_id, entry_count), seed the
+        # ~20-zone hardcoded constant, and wire the atomic
+        # UPDATE ... SET entry_count = entry_count + 1 WHERE zone_id = $1 into
+        # persist_telemetry when zone_entered is non-null (same transaction).
+      - name: zone-counts-endpoint
+        # GET /zones/counts on the existing frontend API: live per-zone totals.
+        after: [zone-counts-increment]
 
   # ── PHASE 3 ────────────────────────────────────────────────────────────────
   - name: anomaly-detection-and-query
@@ -93,12 +105,29 @@ phases:
       and a [since, until] time range as an indexed read.
     proofOfWork:
       kind: integration
-      run: "refined at phase entry — testcontainers Postgres; post events crossing each threshold + a comms-loss gap"
+      run: docker compose -f docker-compose.test.yml run --rm api pytest tests/integration/test_anomalies.py
       pass: >
-        Each default anomaly class fires exactly when its threshold is crossed
-        and not otherwise; GET /anomalies returns the matching rows for a given
-        vehicle within the requested time window and excludes those outside it.
-    changes: []
+        exit code 0 — each default anomaly class fires exactly when its
+        threshold is crossed and not otherwise (including a comms-loss gap);
+        GET /anomalies returns the matching rows for a given vehicle within the
+        requested [since, until] window and excludes those outside it.
+    # Decomposed at phase entry (2026-06-16) from the real shape: a detection
+    # root that adds the anomalies table + synchronous checks in the existing
+    # persist_telemetry path, then a read endpoint and the background watchdog
+    # fanning out off the root.
+    changes:
+      - name: anomaly-detection
+        # Root: migration for anomalies table; synchronous stateless + stateful
+        # checks inside persist_telemetry (stateful uses the prior
+        # vehicle_current_state reading); the anomalies INSERT is the event.
+      - name: anomaly-query-endpoint
+        # GET /anomalies on the frontend API: indexed read filtered by
+        # vehicle_id and a [since, until] time range.
+        after: [anomaly-detection]
+      - name: comms-loss-watchdog
+        # Background by-absence detector: no event from a vehicle for >5s writes
+        # a comms-loss anomaly to the same table.
+        after: [anomaly-detection]
 
   # ── PHASE 4 ────────────────────────────────────────────────────────────────
   - name: fault-transition
@@ -114,12 +143,26 @@ phases:
       cannot double-cancel or create duplicate maintenance records.
     proofOfWork:
       kind: integration
-      run: "refined at phase entry — testcontainers Postgres; fire concurrent + duplicate fault events for one vehicle"
+      run: docker compose -f docker-compose.test.yml run --rm api pytest tests/integration/test_fault_transition.py
       pass: >
-        After concurrent and duplicate fault transitions for the same vehicle,
-        exactly one mission is cancelled and exactly one maintenance record
-        exists; the vehicle ends in status=fault.
-    changes: []
+        exit code 0 — after concurrent and duplicate fault transitions for the
+        same vehicle, exactly one mission is cancelled and exactly one
+        maintenance record exists; the vehicle ends in status=fault.
+    # Decomposed at phase entry (2026-06-16): a core root that adds the
+    # missions + maintenance_records tables and the FOR UPDATE-locked,
+    # idempotent fault handler (proven at the persistence layer under
+    # concurrency), then the HTTP status-update operation that exposes it.
+    changes:
+      - name: fault-transition-core
+        # Root: migrations for missions + maintenance_records (+ uniqueness
+        # constraint for idempotency); transactional handler holding
+        # SELECT ... FOR UPDATE on the vehicle row that cancels the active
+        # mission, inserts the maintenance record, and sets status=fault —
+        # guarded so concurrent/duplicate transitions can't double-apply.
+      - name: status-update-endpoint
+        # Vehicle status-update operation (HTTP) that invokes the fault handler
+        # on transition to fault; lands the phase proof test_fault_transition.py.
+        after: [fault-transition-core]
 
   # ── PHASE 5 ────────────────────────────────────────────────────────────────
   # Infra arrives here: read replica + CDC consumer + Redis + frontend API.
@@ -138,13 +181,44 @@ phases:
       patches over WebSocket. The ingestion API never touches Redis.
     proofOfWork:
       kind: blackbox
-      run: "refined at phase entry — docker compose full topology; POST an event, observe the WS delta via a test WS client"
+      run: docker compose -f docker-compose.test.yml run --rm api pytest tests/integration/test_realtime_ws.py
       pass: >
-        After POSTing a fault/zone-entry to the ingestion API, a connected
-        WebSocket client receives the corresponding state-patch event
-        (vehicle_state_changed / anomaly_detected / zone_count_changed) within
-        a sub-second bound, with no event emitted for an uncommitted write.
-    changes: []
+        exit code 0 — after POSTing a fault/zone-entry to the ingestion API, a
+        connected WebSocket client receives the corresponding state-patch event
+        (vehicle_state_changed / anomaly_detected / zone_count_changed) within a
+        sub-second bound, with no event emitted for an uncommitted write.
+    # Decomposed at phase entry (2026-06-16); cdc-consumer RE-SPLIT (2026-06-16)
+    # after it overran the 10-min apply window: the single CDC change is now two
+    # slices, each sized to fit the window, and the decode plugin is pgoutput
+    # (built-in binary logical-replication output) rather than test_decoding.
+    changes:
+      - name: websocket-fanout
+        # Root (done): Redis + stateful frontend API — async @app.websocket
+        # endpoint, connection registry, REST snapshot on connect, async Redis
+        # subscriber fanning published state patches to connected clients.
+      - name: read-replica-split
+        # Streaming physical replica; frontend REST snapshot (fleet/zones/
+        # anomalies) served from the replica via a replica connection pool.
+        # Rewrites the shared files that the discarded cdc work scaffolded
+        # (db.py pool, persistence read-seam, frontend snapshot, compose, conftest).
+        # Proof: write to primary, snapshot reflects it from the replica.
+        after: [websocket-fanout]
+      - name: cdc-pgoutput-translate
+        # Singleton CDC consumer tailing the primary's logical slot via PGOUTPUT:
+        # CREATE PUBLICATION for vehicle_current_state / anomalies / zone_counts,
+        # slot with pgoutput + replication protocol, decode the binary
+        # Relation/Insert/Update messages into vehicle_state_changed /
+        # anomaly_detected / zone_count_changed, publish to Redis. Ingestion
+        # never touches Redis. Proof is FAST and isolates the risky decode:
+        # write to the primary, assert the correct event JSON lands on the Redis
+        # channel (no replica/WS needed).
+        after: [read-replica-split]
+      - name: cdc-end-to-end-ws
+        # Wire the consumer into the running topology; lands the full phase
+        # blackbox proof (test_realtime_ws.py): POST to ingestion -> WS client
+        # receives the matching state patch sub-second; no event for an
+        # uncommitted write. Thin — websocket-fanout already does Redis->WS.
+        after: [cdc-pgoutput-translate]
 
   # ── PHASE 6 ────────────────────────────────────────────────────────────────
   - name: react-dashboard
@@ -159,10 +233,27 @@ phases:
       surfaces immediately (not at a poll interval). Per-zone counts tick live.
     proofOfWork:
       kind: llm-judge
-      run: "refined at phase entry — Playwright drives the UI while events are injected; judge inspects DOM/screenshots"
+      run: docker compose -f docker-compose.test.yml run --rm web npm run test:ui
       pass: >
-        After a fault is injected, the corresponding vehicle's row updates its
-        status/battery and surfaces the anomaly without a full re-render or page
-        refresh, and the relevant zone count increments live — judged against
-        the captured DOM/screenshot sequence.
-    changes: []
+        Judge confirms: starting from a mounted dashboard seeded with a REST
+        snapshot, dispatching a vehicle_state_changed / anomaly_detected /
+        zone_count_changed patch updates only the affected vehicle row or zone
+        tile (status/battery, latest anomaly, zone count) without a full-list
+        re-render or page refresh — asserted via component tests with a mocked
+        WS/REST transport (no full backend topology), kept light to fit the
+        apply window; judge inspects the rendered DOM/render-count evidence.
+    # Decomposed at phase entry (2026-06-16): shell + live vehicle list first
+    # (carries the React/TS/Vite scaffold + transport), then anomalies + zone
+    # tiles. Proof is component-level with a mocked transport (fast, in-window)
+    # rather than a full-stack Playwright run.
+    changes:
+      - name: dashboard-shell-live-list
+        # Root: scaffold React + TypeScript (Vite) under web/; a typed transport
+        # that fetches the REST snapshot on load and opens the WebSocket; render
+        # the 50-vehicle live list (status + battery), applying granular WS
+        # patches so only the changed vehicle row re-renders (no polling).
+      - name: dashboard-anomalies-zones
+        # Surface the most recent anomaly per vehicle and live per-zone entry
+        # count tiles, both updating from anomaly_detected / zone_count_changed
+        # WS patches. Lands the phase llm-judge proof.
+        after: [dashboard-shell-live-list]
