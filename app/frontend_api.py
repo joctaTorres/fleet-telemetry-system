@@ -325,16 +325,25 @@ async def record_request_metrics(request: Request, call_next):
 
 # The dashboard is served from a different origin (its own host port) than this
 # API, so the browser's REST fetches are cross-origin. Allow them via CORS.
-# Origins are env-configurable (comma-separated); default "*" suits the local
-# runtime/demo. WebSocket upgrades are not subject to CORS.
+# Origins are env-configurable (comma-separated); the default is pinned to
+# "http://localhost:8080" — the dashboard service's host port and the origin
+# Alloy is pinned to — rather than a permissive "*"; override via
+# CORS_ALLOW_ORIGINS (e.g. "*") for other deployments. WebSocket upgrades are
+# not subject to CORS.
 #
-# Allowed request headers are likewise env-configurable; the default "*" covers
-# the W3C "traceparent" header the browser @opentelemetry/sdk-trace-web fetch
-# instrumentation injects on the cross-origin snapshot calls. Because the browser
-# now sends a non-safelisted header, those fetches become preflighted, so this
-# must permit "traceparent" or the joined browser->frontend-api trace is lost.
-_cors_origins = os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",")
-_cors_headers = os.environ.get("CORS_ALLOW_HEADERS", "*").split(",")
+# Allowed request headers are likewise env-configurable; the default is narrowed
+# to exactly the headers the cross-origin snapshot calls need —
+# "traceparent,content-type" — rather than "*". "traceparent" is the W3C header
+# the browser @opentelemetry/sdk-trace-web fetch instrumentation injects; because
+# the browser then sends a non-safelisted header those fetches become
+# preflighted, so this must permit "traceparent" or the joined
+# browser->frontend-api trace is lost. Override via CORS_ALLOW_HEADERS if needed.
+_cors_origins = os.environ.get(
+    "CORS_ALLOW_ORIGINS", "http://localhost:8080"
+).split(",")
+_cors_headers = os.environ.get(
+    "CORS_ALLOW_HEADERS", "traceparent,content-type"
+).split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _cors_origins],
