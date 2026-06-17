@@ -1,0 +1,42 @@
+# Capstone clean-boot evidence snapshot (17:08:47)
+
+## Services
+fleet-telemetry-system-alloy-1 Up 8 minutes (healthy)
+fleet-telemetry-system-cdc-1 Up 8 minutes
+fleet-telemetry-system-dashboard-1 Up 8 minutes
+fleet-telemetry-system-db-1 Up 9 minutes (healthy)
+fleet-telemetry-system-frontend-1 Up 8 minutes (healthy)
+fleet-telemetry-system-grafana-1 Up 8 minutes (healthy)
+fleet-telemetry-system-ingestion-1 Up 8 minutes (healthy)
+fleet-telemetry-system-k6-1 Up 8 minutes
+fleet-telemetry-system-prometheus-1 Up 9 minutes (healthy)
+fleet-telemetry-system-redis-1 Up 9 minutes (healthy)
+fleet-telemetry-system-replica-1 Up 8 minutes (healthy)
+fleet-telemetry-system-replication-probe-1 Up 8 minutes
+fleet-telemetry-system-tempo-1 Up 9 minutes (healthy)
+
+## Dashboards (GET /api/search?type=dash-db)
+- CDC Consumer
+- Fleet Observability Overview
+- Frontend API & WebSockets
+- Frontend Web (Browser)
+- Ingestion API
+- Primary/Replica Streaming
+- Pub/Sub
+- Redis Fan-out
+TOTAL: 8
+## Service-graph edges (traces_service_graph_request_total)
+user -> ingestion-api = 25116
+user -> frontend-api = 192
+ingestion-api -> db = 25186
+cdc-consumer -> frontend-api = 31394
+frontend-api -> replica = 176
+fleet-dashboard-web -> frontend-api = 3
+
+## Tempo services
+['cdc-consumer', 'fleet-dashboard-web', 'frontend-api', 'ingestion-api']
+
+## browser->frontend joined trace
+60246640df958aec64ea9afa362cedf3
+## cdc->frontend joined trace
+1365d31f5ac00179528d554e6f74999
