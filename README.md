@@ -28,7 +28,10 @@ fleet against it with [Grafana k6](#-load-simulation-grafana-k6):
 docker compose up --build
 ```
 
-Then open the live dashboard at **http://localhost:8080** 👈
+Then open the live dashboard at **http://localhost:8080** 👈 — and be sure to
+check out the **full observability system** at **[Grafana →
+http://localhost:3000/dashboards](http://localhost:3000/dashboards)**, where every
+flow is traced and dashboarded ([what's inside](#-observability--opentelemetry-end-to-end)).
 
 You'll watch the floor in real time as k6 streams telemetry: the 50-vehicle list
 (status + battery), the latest anomaly per vehicle, and the per-zone entry
@@ -157,6 +160,13 @@ service into it. There's nothing to configure: open **[Grafana →
 http://localhost:3000/dashboards](http://localhost:3000/dashboards)** and all eight dashboards are
 already there, populated in real time by the k6 fleet. No login (anonymous admin
 is enabled for local use).
+
+[![Fleet Observability Overview dashboard — a live KPI stat row (ingestion throughput, errors, WebSocket connections, CDC publish rate, Redis fan-out rate, replication lag), a critical-flow service graph, and end-to-end pipeline throughput / API latency panels](docs/images/fleet-system-overview.png)](docs/images/fleet-system-overview.png)
+
+*The **Fleet Observability Overview** — live fleet KPIs, the critical-flow service
+graph (`user → ingestion-api → db`, `cdc-consumer → frontend-api → replica`,
+`browser → frontend-api`), and end-to-end pipeline throughput / latency, all driven
+by the k6 fleet. One of eight dashboards, preloaded on `docker compose up`.*
 
 Every component emits OTLP to a single front door — **Grafana Alloy** — which
 fans **traces → Tempo** and **metrics → Prometheus**, both rendered in Grafana:
