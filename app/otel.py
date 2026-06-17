@@ -92,6 +92,26 @@ def configure_otel(service_name: str) -> bool:
     return True
 
 
+def route_template(app: object, request: object) -> str:
+    """Return the matched route's path template (e.g. ``/telemetry``).
+
+    Shared by both FastAPI apps to label their request metrics with a bounded
+    route template rather than the raw URL. Looks up the endpoint resolved onto
+    the request scope and returns the matching route's ``path``; falls back to
+    the raw request path when no route matched (a 404), so the metric label stays
+    bounded to the handful of declared routes rather than unbounded raw URLs.
+
+    Takes ``app`` and ``request`` as parameters rather than importing either API
+    module, so it carries no dependency back on its callers (no import cycle).
+    """
+    endpoint = request.scope.get("endpoint")
+    if endpoint is not None:
+        for route in app.router.routes:
+            if getattr(route, "endpoint", None) is endpoint:
+                return route.path
+    return request.url.path
+
+
 def instrument_fastapi_app(app: object) -> None:
     """Instrument a FastAPI app for request spans in one call.
 

@@ -45,7 +45,7 @@ from .events import (
     extract_trace_context,
     strip_trace_context,
 )
-from .otel import configure_otel, instrument_fastapi_app
+from .otel import configure_otel, instrument_fastapi_app, route_template
 from .persistence import (
     aggregate_fleet_state,
     current_vehicle_states,
@@ -286,20 +286,6 @@ BROADCAST_COUNTER = _meter.create_counter(
 )
 
 
-def _route_template(request: Request) -> str:
-    """Return the matched route's path template (e.g. ``/vehicles``).
-
-    Falls back to the raw request path when no route matched (a 404), keeping the
-    metric label bounded to the handful of declared routes rather than raw URLs.
-    """
-    endpoint = request.scope.get("endpoint")
-    if endpoint is not None:
-        for route in app.router.routes:
-            if getattr(route, "endpoint", None) is endpoint:
-                return route.path
-    return request.url.path
-
-
 @app.middleware("http")
 async def record_request_metrics(request: Request, call_next):
     """Record the request count + duration for every response, including 422s.
@@ -315,7 +301,7 @@ async def record_request_metrics(request: Request, call_next):
     duration_ms = (time.perf_counter() - start) * 1000.0
     attributes = {
         "http.method": request.method,
-        "http.route": _route_template(request),
+        "http.route": route_template(app, request),
         "http.status_code": response.status_code,
     }
     REQUEST_COUNTER.add(1, attributes)

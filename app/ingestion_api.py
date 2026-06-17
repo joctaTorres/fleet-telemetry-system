@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from opentelemetry import metrics, trace
 
 from .models import TelemetryEvent, VehicleStatusUpdate
-from .otel import configure_otel, instrument_fastapi_app
+from .otel import configure_otel, instrument_fastapi_app, route_template
 from .persistence import persist_telemetry, set_vehicle_status, transition_to_fault
 
 # Service identity for every span and metric this process emits. Kept as a
@@ -63,20 +63,6 @@ REQUEST_DURATION = _meter.create_histogram(
 )
 
 
-def _route_template(request: Request) -> str:
-    """Return the matched route's path template (e.g. ``/telemetry``).
-
-    Falls back to the raw request path when no route matched (a 404), keeping the
-    metric label bounded to the handful of declared routes rather than raw URLs.
-    """
-    endpoint = request.scope.get("endpoint")
-    if endpoint is not None:
-        for route in app.router.routes:
-            if getattr(route, "endpoint", None) is endpoint:
-                return route.path
-    return request.url.path
-
-
 @app.middleware("http")
 async def record_request_metrics(request: Request, call_next):
     """Record the request count + duration for every response, including 422s.
@@ -90,7 +76,7 @@ async def record_request_metrics(request: Request, call_next):
     duration_ms = (time.perf_counter() - start) * 1000.0
     attributes = {
         "http.method": request.method,
-        "http.route": _route_template(request),
+        "http.route": route_template(app, request),
         "http.status_code": response.status_code,
     }
     REQUEST_COUNTER.add(1, attributes)
