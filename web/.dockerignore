@@ -1,0 +1,6 @@
+# Never ship host-installed deps into the image: native binaries (esbuild,
+# rollup) are platform-specific and would break the alpine container. The image
+# runs its own `npm install`.
+node_modules
+dist
+.vite

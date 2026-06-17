@@ -1,0 +1,116 @@
+# Integration-test stack: a real Postgres primary + streaming read replica,
+# Redis, the application container, and the singleton CDC consumer running as its
+# own long-lived service (`cdc`: `python -m app.cdc_consumer`) — a single reader
+# of the primary's logical slot that decodes the WAL and publishes derived events
+# to Redis. The ingestion API never touches Redis; the event stream is sourced
+# only from this service.
+# These are throwaway, test-only credentials passed via the environment — the
+# application source itself reads its DSNs from the environment and hard-codes none.
+services:
+  db:
+    image: postgres:16-alpine
+    # wal_level=logical already satisfies physical streaming (this slice) and the
+    # CDC follow-on's logical slot; plus enough WAL senders / replication slots
+    # for one physical replica (and the future logical slot).
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet
+      POSTGRES_DB: fleet_test
+    volumes:
+      # Adds a `host replication ... trust` pg_hba rule so the replica can stream.
+      - ./docker/primary-init:/docker-entrypoint-initdb.d:ro
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  replica:
+    image: postgres:16-alpine
+    # Bootstraps via pg_basebackup from the primary, then runs as a hot standby
+    # streaming physically from it. The frontend serves its connect snapshot here.
+    entrypoint: ["/bin/sh", "/replica-entrypoint.sh"]
+    environment:
+      POSTGRES_USER: fleet
+      POSTGRES_PASSWORD: fleet
+      PRIMARY_HOST: db
+      PRIMARY_PORT: "5432"
+    volumes:
+      - ./docker/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+    tmpfs:
+      - /var/lib/postgresql/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleet -d fleet_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
+
+  # The React + TypeScript dashboard's component-test runner. Its default
+  # exercise is `npm run test:ui` (Vitest + RTL under jsdom) with a mocked
+  # REST + WS transport, so it deliberately has no dependency on the
+  # db/replica/redis/cdc topology — the phase proof
+  # `docker compose -f docker-compose.test.yml run --rm web npm run test:ui`
+  # runs entirely in-process.
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://fleet:fleet@db:5432/fleet_test
+      REPLICA_URL: postgresql://fleet:fleet@replica:5432/fleet_test
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      replica:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # The singleton CDC consumer, run as its own long-lived process — the sole
+  # producer on the `fleet:events` Redis channel. Built from the same image as
+  # `api`, it tails the primary's pgoutput logical slot, decodes the WAL, and
+  # publishes derived events. Exactly one instance: a logical slot is a
+  # single-reader construct. It comes up before migrations run (they execute in
+  # the test container), so the supervisor's bounded-backoff restart absorbs the
+  # window where the publication / watched tables do not yet exist. Reads its
+  # DSN/URL from the environment, with no hard-coded fallback in source.
+  cdc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.cdc_consumer"]
+    environment:
+      DATABASE_URL: postgresql://fleet:fleet@db:5432/fleet_test
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
