@@ -38,7 +38,7 @@ fault, and converge on the charging bays at shift change.
 | Service | URL |
 |---|---|
 | 📊 Dashboard | http://localhost:8080 |
-| 📈 Grafana (observability) | http://localhost:3000 |
+| 📈 Grafana (observability) | http://localhost:3000/dashboards |
 | Frontend API (REST + `ws://…/ws`) | http://localhost:8002 |
 | Ingestion API | http://localhost:8001 |
 | Tempo (traces) | http://localhost:3200 |
@@ -154,7 +154,7 @@ plus `INGESTION_BASE_URL` / `FRONTEND_BASE_URL`.
 The same `docker compose up` that runs the system also stands up a **self-hosted
 [OpenTelemetry](https://opentelemetry.io) + Grafana stack** and wires every
 service into it. There's nothing to configure: open **[Grafana →
-http://localhost:3000](http://localhost:3000)** and all eight dashboards are
+http://localhost:3000/dashboards](http://localhost:3000/dashboards)** and all eight dashboards are
 already there, populated in real time by the k6 fleet. No login (anonymous admin
 is enabled for local use).
 
