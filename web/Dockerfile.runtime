@@ -1,0 +1,32 @@
+# Runtime image for the dashboard: build the Vite/React/TS app, then serve the
+# built static assets over HTTP. Separate from the test `Dockerfile` (which runs
+# the vitest component suite); this one is used only by the runtime
+# `docker-compose.yml` `dashboard` service.
+#
+# The frontend API host URL + WS URL are passed as build args and exported as
+# VITE_* so `createHttpTransport` (web/src/transport.ts) bakes them in at build
+# time. No API host/port is hard-coded in source — the wiring is configured from
+# the environment at build time. Defaults stay same-origin when the args are
+# absent, so a plain `vite build` is unaffected.
+FROM node:20-alpine AS build
+WORKDIR /app
+
+COPY package.json ./
+RUN npm install
+
+COPY . .
+
+ARG VITE_API_BASE_URL=""
+ARG VITE_WS_URL=""
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+ENV VITE_WS_URL=${VITE_WS_URL}
+
+RUN npm run build
+
+# Serve the built /dist over HTTP on port 80.
+FROM nginx:1.27-alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+# SPA fallback so a deep link still serves index.html.
+RUN printf 'server {\n  listen 80;\n  root /usr/share/nginx/html;\n  location / {\n    try_files $uri $uri/ /index.html;\n  }\n}\n' > /etc/nginx/conf.d/default.conf
+EXPOSE 80
+CMD ["nginx", "-g", "daemon off;"]

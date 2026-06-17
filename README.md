@@ -14,33 +14,33 @@ WebSocket — derived from the Postgres WAL, with **no dual-write**.
 
 ---
 
-## ⚡ Quick start
+## ⚡ Quick start — run it end to end
 
-Everything runs through one Docker Compose stack that stands up the
-**production-shaped topology** — Postgres primary (logical WAL) + streaming read
-replica + Redis + the singleton CDC consumer — and exercises it end to end.
+**One command** serves the entire system *and* drives a continuous 50-vehicle
+fleet against it with [Grafana k6](#-load-simulation-grafana-k6):
 
 ```bash
-# Backend — full integration suite against the real topology
-docker compose -f docker-compose.test.yml run --rm api pytest
-
-# Real-time path, end to end:  POST → WAL → pgoutput CDC → Redis → WebSocket
-docker compose -f docker-compose.test.yml run --rm api pytest tests/integration/test_realtime_ws.py
-
-# Dashboard — React + TypeScript component tests (mocked transport)
-docker compose -f docker-compose.test.yml run --rm web npm run test:ui
-
-# Tear everything down (removes volumes)
-docker compose -f docker-compose.test.yml down -v
+docker compose up --build
 ```
 
-That's the whole system, proven: concurrent zone bursts, atomic fault
-transitions, anomaly detection, and a sub-second POST→WebSocket delta.
+Then open the live dashboard at **http://localhost:8080** 👈
 
-> **Note** — this is a proof-driven slice. The Compose file is the integration
-> harness; the `api`/`web` containers default to running their test suites and
-> expose no public ports. There is no standalone ASGI server wired up yet (see
-> [Running interactively](#-running-interactively)).
+You'll watch the floor in real time as k6 streams telemetry: the 50-vehicle list
+(status + battery), the latest anomaly per vehicle, and the per-zone entry
+counts all update live over WebSocket — no refresh, no polling. Vehicles drain,
+fault, and converge on the charging bays at shift change.
+
+| Service | URL |
+|---|---|
+| 📊 Dashboard | http://localhost:8080 |
+| Frontend API (REST + `ws://…/ws`) | http://localhost:8002 |
+| Ingestion API | http://localhost:8001 |
+
+Tear it all down (and drop volumes) with `docker compose down -v`.
+
+> The runtime stack (`docker-compose.yml`) and the test harness
+> (`docker-compose.test.yml`) share one Compose project name — run only one at a
+> time. To run the test suites instead, see [Testing & proofs](#-testing--proofs).
 
 ---
 
@@ -90,6 +90,50 @@ from committed state. Sourcing the stream from the WAL makes it a *deterministic
 function of what committed*, eliminating that whole class of bug. The trade-off
 is operational: a singleton slot reader whose replication lag must be monitored.
 Full options analysis in the [ADR](docs/ADR.md).
+
+---
+
+## 🔬 Load simulation (Grafana k6)
+
+The runtime stack ships a [k6](https://k6.io) service
+([`k6/fleet-simulation.js`](k6/fleet-simulation.js)) that fires automatically on
+`docker compose up` and drives a **continuous, stateful** fleet — a realistic
+stand-in for 50 vehicles on the warehouse floor, and the thing that makes the
+dashboard move.
+
+- **50 virtual users = 50 vehicles** (`v-0`…`v-49`). A `constant-vus` executor
+  holds them for an effectively-unbounded duration, so the fleet streams ~50
+  events/s steadily for as long as the stack is up.
+- **Each VU is one stateful vehicle** — it carries its own position, speed,
+  battery, and status across ticks and emits telemetry at ~1 Hz. It moves and
+  drains, crosses into zones (driving the live counters), and on a recurring
+  shift cycle converges on the `charging_bay_*` zones (the concurrent same-zone
+  entry scenario) before recovering.
+- **It exercises every anomaly path** — vehicles periodically trip low-battery,
+  overspeed, stuck, teleport, and fault transitions, so anomalies and
+  fault→maintenance handling actually fire under load.
+- **It asserts the system behaves** — k6 `checks` (telemetry → `201`; the
+  frontend reads reflect the load) and `thresholds` gate the run and make it
+  exit non-zero on breach:
+
+  | Threshold | Bound |
+  |---|---|
+  | p95 ingest latency | `< 750 ms` |
+  | ingest error rate | `< 5%` |
+  | check pass-rate | `> 95%` |
+  | HTTP failure rate | `< 5%` |
+
+Every event it sends flows through the CDC → Redis → WebSocket path and patches
+the dashboard live. Tune it via env vars (all optional):
+
+```bash
+# k6 already runs inside `docker compose up`; re-run or tune it on demand:
+FLEET_SIZE=50 DURATION=10m SHIFT_PERIOD=60 docker compose run --rm k6
+```
+
+`FLEET_SIZE` (vehicles/VUs), `DURATION` (run length, default effectively
+unbounded), `SHIFT_PERIOD` (ticks between shift-change charging convergence),
+plus `INGESTION_BASE_URL` / `FRONTEND_BASE_URL`.
 
 ---
 
@@ -158,18 +202,26 @@ Detected synchronously inside the ingest transaction (the `anomalies` INSERT
 | **By absence** (watchdog) | no event from a vehicle for > 5 s → `comms_loss`. |
 
 Thresholds live in [`app/models.py`](app/models.py) as named constants.
-Zones are a hardcoded startup constant of 20: `zone-01 … zone-20`.
+Zones are a hardcoded startup constant of 20 realistic warehouse areas —
+`inbound_dock_a`, `receiving_staging`, `aisle_a…c`, `high_bay_1/2`,
+`pick_zone_1/2`, `pack_station`, `sort_belt`, `outbound_dock_a/b`,
+`charging_bay_1/2/3`, `maintenance_bay`, … — seeded at startup.
 
 ---
 
 ## 🖥️ Running interactively
 
-The Compose stack is a test harness (no exposed ports, no ASGI server). To drive
-the system by hand, point the apps at a running Postgres + Redis and serve them
-with an ASGI server (add `uvicorn` to the environment first):
+`docker compose up` (see [Quick start](#-quick-start--run-it-end-to-end)) is the
+intended way to run the whole system — `docker-compose.yml` serves the primary +
+streaming replica + Redis + CDC consumer, the uvicorn-served ingestion (`:8001`)
+and frontend (`:8002`) APIs, the nginx-served dashboard (`:8080`), and the k6
+load. Run migrations + zone seeding happen in a one-shot `migrate` step the APIs
+wait on.
+
+To run a service by hand against your own Postgres + Redis:
 
 ```bash
-export DATABASE_URL=postgresql://fleet:fleet@localhost:5432/fleet_test
+export DATABASE_URL=postgresql://fleet:fleet@localhost:5432/fleet
 export REPLICA_URL=$DATABASE_URL          # single-node: replica = primary
 export REDIS_URL=redis://localhost:6379/0
 
@@ -180,6 +232,9 @@ uv run python -m app.cdc_consumer         # singleton WAL → Redis publisher
 
 cd web && npm install && npm run dev       # Vite dev server for the dashboard
 ```
+
+The dashboard reads its API/WS targets from `VITE_API_BASE_URL` / `VITE_WS_URL`
+(default same-origin), so point them at the frontend API when serving it apart.
 
 ---
 
@@ -219,8 +274,11 @@ app/
   migrations/             # 0001–0009 schema (+ CDC publication)
 web/                      # Vite + React 18 + TypeScript dashboard
   src/                    # transport, stores, VehicleList/Row, ZoneTiles, anomalies
+k6/fleet-simulation.js    # stateful 50-vehicle continuous load simulation
 tests/integration/        # proofs against the real Docker topology
 docker/                   # primary pg_hba + replica bootstrap (pg_basebackup)
+docker-compose.yml        # runtime stack: serves the full app + k6 (one command)
+docker-compose.test.yml   # test harness: real topology, runs the proof suites
 docs/ADR.md               # architecture decision record
 ```
 
@@ -228,9 +286,10 @@ docs/ADR.md               # architecture decision record
 
 ## 🧰 Tech stack
 
-**Backend** — Python ≥ 3.14 · FastAPI · psycopg 3 (+ pool) · Pydantic v2 ·
-PostgreSQL 16 (logical replication, pgoutput) · Redis 7 · `uv`
-**Frontend** — React 18 · TypeScript · Vite · Vitest + Testing Library
+**Backend** — Python ≥ 3.14 · FastAPI · uvicorn · psycopg 3 (+ pool) · Pydantic
+v2 · PostgreSQL 16 (logical replication, pgoutput) · Redis 7 · `uv`
+**Frontend** — React 18 · TypeScript · Vite · Vitest + Testing Library · nginx
+**Load** — Grafana k6 (stateful, continuous fleet simulation)
 **Infra** — Docker Compose: primary + streaming replica + Redis + singleton CDC
 
 ---
@@ -249,3 +308,4 @@ phase's real shape emerged, and committed semantically once green.
 | 4 | Atomic fault transition (mission cancel + maintenance record) |
 | 5 | CDC → WebSocket propagation (pgoutput) |
 | 6 | Live React + TypeScript dashboard |
+| + | Single-command runtime stack + continuous k6 fleet simulation |

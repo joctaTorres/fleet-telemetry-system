@@ -46,7 +46,7 @@ def test_committed_write_reflected_in_replica_read_seams():
     """6.2 — a committed primary write is reflected by the replica read seams."""
     persist_telemetry(
         TelemetryEvent(
-            vehicle_id="rv1", status="moving", battery_pct=80, zone_entered="zone-07"
+            vehicle_id="rv1", status="moving", battery_pct=80, zone_entered="high_bay_1"
         )
     )
     persist_telemetry(TelemetryEvent(vehicle_id="rv2", status="idle", battery_pct=55))
@@ -55,12 +55,12 @@ def test_committed_write_reflected_in_replica_read_seams():
     fleet = aggregate_fleet_state(replica_connection)
     zones = zone_entry_counts(replica_connection)
     assert fleet == {"idle": 1, "moving": 1, "charging": 0, "fault": 0}
-    assert zones["zone-07"] == 1
-    assert zones["zone-01"] == 0  # an untouched zone still reports zero
+    assert zones["high_bay_1"] == 1
+    assert zones["inbound_dock_a"] == 0  # an untouched zone still reports zero
 
     # The REST handlers, which read through the replica pool, agree.
     assert get_fleet_state() == fleet
-    assert get_zone_counts()["zone-07"] == 1
+    assert get_zone_counts()["high_bay_1"] == 1
 
 
 def test_uncommitted_write_not_visible_until_committed():
@@ -68,21 +68,21 @@ def test_uncommitted_write_not_visible_until_committed():
     rolled_back_primary_write(
         "UPDATE zone_counts SET entry_count = entry_count + 5 "
         "WHERE zone_id = %(zone_id)s",
-        {"zone_id": "zone-09"},
+        {"zone_id": "bulk_storage"},
     )
     wait_replica_caught_up()
     # The aborted increment is never visible on the standby.
-    assert zone_entry_counts(replica_connection)["zone-09"] == 0
+    assert zone_entry_counts(replica_connection)["bulk_storage"] == 0
 
     # A genuinely committed increment, by contrast, does become visible — proving
     # the replica is live and streaming, not merely lagging.
     persist_telemetry(
         TelemetryEvent(
-            vehicle_id="rv3", status="moving", battery_pct=40, zone_entered="zone-09"
+            vehicle_id="rv3", status="moving", battery_pct=40, zone_entered="bulk_storage"
         )
     )
     wait_replica_caught_up()
-    assert zone_entry_counts(replica_connection)["zone-09"] == 1
+    assert zone_entry_counts(replica_connection)["bulk_storage"] == 1
 
 
 def test_replica_rejects_direct_write():
@@ -91,7 +91,7 @@ def test_replica_rejects_direct_write():
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
             rconn.execute(
                 "UPDATE zone_counts SET entry_count = entry_count + 1 "
-                "WHERE zone_id = 'zone-01'"
+                "WHERE zone_id = 'inbound_dock_a'"
             )
 
 

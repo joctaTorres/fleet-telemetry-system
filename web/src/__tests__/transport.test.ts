@@ -90,7 +90,7 @@ describe("createHttpTransport", () => {
   });
 
   it("fetches the zone snapshot from /zones/counts, once", async () => {
-    const counts = { "zone-00": 0, "zone-01": 3 };
+    const counts = { "inbound_dock_a": 0, "inbound_dock_b": 3 };
     const fetchFn = vi.fn(async () => ({ json: async () => counts }) as Response);
     const transport = createHttpTransport({
       fetchFn,

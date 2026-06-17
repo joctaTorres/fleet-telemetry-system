@@ -42,22 +42,22 @@ def test_get_zone_counts_reports_live_totals_others_unchanged(client: TestClient
     """2.2 — after a mix of zone entries, GET reports each zone's live total and
     leaves every other zone at 0."""
     persist_telemetry(
-        TelemetryEvent(vehicle_id="a", status="moving", battery_pct=10, zone_entered="zone-03")
+        TelemetryEvent(vehicle_id="a", status="moving", battery_pct=10, zone_entered="receiving_staging")
     )
     persist_telemetry(
-        TelemetryEvent(vehicle_id="b", status="moving", battery_pct=20, zone_entered="zone-03")
+        TelemetryEvent(vehicle_id="b", status="moving", battery_pct=20, zone_entered="receiving_staging")
     )
     persist_telemetry(
-        TelemetryEvent(vehicle_id="c", status="idle", battery_pct=30, zone_entered="zone-11")
+        TelemetryEvent(vehicle_id="c", status="idle", battery_pct=30, zone_entered="pick_zone_2")
     )
 
     resp = client.get("/zones/counts")
 
     assert resp.status_code == 200
     counts = resp.json()
-    assert counts["zone-03"] == 2
-    assert counts["zone-11"] == 1
-    entered = {"zone-03", "zone-11"}
+    assert counts["receiving_staging"] == 2
+    assert counts["pick_zone_2"] == 1
+    entered = {"receiving_staging", "pick_zone_2"}
     for zone_id, count in counts.items():
         if zone_id not in entered:
             assert count == 0
@@ -77,7 +77,7 @@ def test_concurrent_zone_entries_counted_exactly_via_get():
                 "vehicle_id": f"v-{i:03d}",
                 "status": "moving",
                 "battery_pct": float(i % 101),
-                "zone_entered": "zone-07",
+                "zone_entered": "high_bay_1",
             },
         )
         assert resp.status_code == 201
@@ -89,8 +89,8 @@ def test_concurrent_zone_entries_counted_exactly_via_get():
 
     assert resp.status_code == 200
     counts = resp.json()
-    assert counts["zone-07"] == n
-    assert sum(counts.values()) == n  # every increment landed on zone-07 only
+    assert counts["high_bay_1"] == n
+    assert sum(counts.values()) == n  # every increment landed on high_bay_1 only
 
 
 def test_null_zone_entered_leaves_all_counts_unchanged():
@@ -120,7 +120,7 @@ def test_get_zone_counts_returns_all_seeded_zones(client: TestClient):
     """3.3 — proof-of-work: GET returns all ~20 seeded zones, even when only some
     have been entered."""
     persist_telemetry(
-        TelemetryEvent(vehicle_id="x", status="moving", battery_pct=50, zone_entered="zone-09")
+        TelemetryEvent(vehicle_id="x", status="moving", battery_pct=50, zone_entered="bulk_storage")
     )
 
     resp = client.get("/zones/counts")
@@ -129,4 +129,4 @@ def test_get_zone_counts_returns_all_seeded_zones(client: TestClient):
     counts = resp.json()
     assert set(counts) == set(ZONES)
     assert len(counts) == len(ZONES) == 20
-    assert counts["zone-09"] == 1
+    assert counts["bulk_storage"] == 1

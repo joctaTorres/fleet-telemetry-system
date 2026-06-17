@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime
 
 import redis.asyncio as redis
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
 from .config import get_redis_url
@@ -123,6 +125,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Fleet Telemetry Frontend API", lifespan=lifespan)
+
+# The dashboard is served from a different origin (its own host port) than this
+# API, so the browser's REST fetches are cross-origin. Allow them via CORS.
+# Origins are env-configurable (comma-separated); default "*" suits the local
+# runtime/demo. WebSocket upgrades are not subject to CORS.
+_cors_origins = os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[o.strip() for o in _cors_origins],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 async def _build_snapshot() -> dict:

@@ -91,7 +91,7 @@ def test_connect_sends_one_shot_snapshot(client: TestClient, redis_client):
     persist_telemetry(TelemetryEvent(vehicle_id="a", status="moving", battery_pct=50))
     persist_telemetry(TelemetryEvent(vehicle_id="b", status="idle", battery_pct=60))
     persist_telemetry(
-        TelemetryEvent(vehicle_id="c", status="moving", battery_pct=70, zone_entered="zone-01")
+        TelemetryEvent(vehicle_id="c", status="moving", battery_pct=70, zone_entered="inbound_dock_a")
     )
     # The snapshot is now served from the streaming replica; wait out the small
     # async-replication lag so the assertion is against caught-up state.
@@ -108,9 +108,9 @@ def test_connect_sends_one_shot_snapshot(client: TestClient, redis_client):
         "fault": 0,
     }
     zones = snapshot["payload"]["zones"]
-    assert zones["zone-01"] == 1
+    assert zones["inbound_dock_a"] == 1
     # All seeded zones are present, with never-entered zones reporting zero.
-    assert zones["zone-02"] == 0
+    assert zones["inbound_dock_b"] == 0
 
 
 def test_published_patch_received_sub_second(client: TestClient, redis_client):
@@ -136,7 +136,7 @@ def test_all_three_event_types_forwarded_verbatim(client: TestClient, redis_clie
     patches = [
         {"type": VEHICLE_STATE_CHANGED, "payload": {"vehicle_id": "v1", "status": "idle"}},
         {"type": ANOMALY_DETECTED, "payload": {"vehicle_id": "v1", "anomaly_type": "overspeed"}},
-        {"type": ZONE_COUNT_CHANGED, "payload": {"zone_id": "zone-03", "entry_count": 7}},
+        {"type": ZONE_COUNT_CHANGED, "payload": {"zone_id": "receiving_staging", "entry_count": 7}},
     ]
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()  # drain the snapshot
@@ -150,7 +150,7 @@ def test_all_three_event_types_forwarded_verbatim(client: TestClient, redis_clie
 
 def test_patch_fanned_out_to_two_clients(client: TestClient, redis_client):
     """4.4 — a single published patch is delivered to both connected clients."""
-    patch = {"type": ZONE_COUNT_CHANGED, "payload": {"zone_id": "zone-05", "entry_count": 3}}
+    patch = {"type": ZONE_COUNT_CHANGED, "payload": {"zone_id": "aisle_b", "entry_count": 3}}
     with client.websocket_connect("/ws") as ws_a, client.websocket_connect("/ws") as ws_b:
         ws_a.receive_json()  # drain snapshots
         ws_b.receive_json()
