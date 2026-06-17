@@ -1,0 +1,3 @@
+# Empty plugin-provisioning dir. Mounting docker/grafana/provisioning over
+# Grafana's image default replaces the whole tree, so this placeholder keeps the
+# plugins/ subdir present and avoids a spurious "no such directory" startup error.

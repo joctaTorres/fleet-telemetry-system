@@ -18,8 +18,13 @@ COPY . .
 
 ARG VITE_API_BASE_URL=""
 ARG VITE_WS_URL=""
+# Browser-origin OTLP/HTTP traces endpoint for the @opentelemetry/sdk-trace-web
+# bootstrap (web/src/otel.ts). Baked in at build time like the URLs above; unset
+# leaves browser tracing a safe no-op so a plain `vite build` is unaffected.
+ARG VITE_OTLP_TRACES_ENDPOINT=""
 ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
 ENV VITE_WS_URL=${VITE_WS_URL}
+ENV VITE_OTLP_TRACES_ENDPOINT=${VITE_OTLP_TRACES_ENDPOINT}
 
 RUN npm run build
 

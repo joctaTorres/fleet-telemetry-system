@@ -1,0 +1,204 @@
+{
+  "uid": "pubsub",
+  "title": "Pub/Sub",
+  "tags": ["fleet", "pubsub", "redis", "otel"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Publish rate (fleet:events)",
+      "description": "Per-second rate at which the CDC consumer publishes decoded change events onto the fleet:events Redis channel, from the cdc.events_published counter (cdc_events_published_total). This is the producer side of the pub/sub hop.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "axisLabel": "publishes/sec"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (cdc_event_type) (rate(cdc_events_published_total[$__rate_interval]))",
+          "legendFormat": "publish {{cdc_event_type}}",
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(cdc_events_published_total[$__rate_interval]))",
+          "legendFormat": "publish total",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Subscribe / delivery rate (frontend)",
+      "description": "Per-second rate at which the frontend subscriber receives a fleet:events message and fans it out to WebSocket clients, from the frontend.ws.broadcasts counter (frontend_ws_broadcasts_total). This is the consumer side of the pub/sub hop; it should track the publish rate.",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "smooth",
+            "fillOpacity": 15,
+            "showPoints": "never",
+            "lineWidth": 2,
+            "axisLabel": "deliveries/sec"
+          },
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": ["lastNotNull", "max"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum(rate(frontend_ws_broadcasts_total[$__rate_interval]))",
+          "legendFormat": "deliveries/sec",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "Connected trace: cdc-consumer ↔ frontend-api",
+      "description": "Tempo traces whose spans include BOTH service.name=cdc-consumer AND service.name=frontend-api, surfaced via the spanset-intersection TraceQL `{ resource.service.name = \"cdc-consumer\" } && { resource.service.name = \"frontend-api\" }`. Each row is a single distributed trace where the W3C traceparent threaded through the fleet:events envelope made the pub/sub hop one connected trace. Click a Trace ID to follow ingestion -> cdc.decode -> cdc.publish -> redis.subscribe -> ws.broadcast.",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 11,
+        "w": 24,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "limit": 20,
+          "tableType": "traces",
+          "query": "{ resource.service.name = \"cdc-consumer\" } && { resource.service.name = \"frontend-api\" }"
+        }
+      ]
+    }
+  ]
+}

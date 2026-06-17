@@ -28,7 +28,10 @@ fleet against it with [Grafana k6](#-load-simulation-grafana-k6):
 docker compose up --build
 ```
 
-Then open the live dashboard at **http://localhost:8080** 👈
+Then open the live dashboard at **http://localhost:8080** 👈 — and be sure to
+check out the **full observability system** at **[Grafana →
+http://localhost:3000/dashboards](http://localhost:3000/dashboards)**, where every
+flow is traced and dashboarded ([what's inside](#-observability--opentelemetry-end-to-end)).
 
 You'll watch the floor in real time as k6 streams telemetry: the 50-vehicle list
 (status + battery), the latest anomaly per vehicle, and the per-zone entry
@@ -38,8 +41,15 @@ fault, and converge on the charging bays at shift change.
 | Service | URL |
 |---|---|
 | 📊 Dashboard | http://localhost:8080 |
+| 📈 Grafana (observability) | http://localhost:3000/dashboards |
 | Frontend API (REST + `ws://…/ws`) | http://localhost:8002 |
 | Ingestion API | http://localhost:8001 |
+| Tempo (traces) | http://localhost:3200 |
+| Prometheus (metrics) | http://localhost:9090 |
+
+Grafana opens straight to the dashboards (anonymous admin enabled — no login) with
+**all 8 dashboards preloaded and live** from the k6 fleet — see
+[Observability](#-observability--opentelemetry-end-to-end).
 
 Tear it all down (and drop volumes) with `docker compose down -v`.
 
@@ -139,6 +149,82 @@ FLEET_SIZE=50 DURATION=10m SHIFT_PERIOD=60 docker compose run --rm k6
 `FLEET_SIZE` (vehicles/VUs), `DURATION` (run length, default effectively
 unbounded), `SHIFT_PERIOD` (ticks between shift-change charging convergence),
 plus `INGESTION_BASE_URL` / `FRONTEND_BASE_URL`.
+
+---
+
+## 🔭 Observability — OpenTelemetry end to end
+
+The same `docker compose up` that runs the system also stands up a **self-hosted
+[OpenTelemetry](https://opentelemetry.io) + Grafana stack** and wires every
+service into it. There's nothing to configure: open **[Grafana →
+http://localhost:3000/dashboards](http://localhost:3000/dashboards)** and all eight dashboards are
+already there, populated in real time by the k6 fleet. No login (anonymous admin
+is enabled for local use).
+
+[![Fleet Observability Overview dashboard — a live KPI stat row (ingestion throughput, errors, WebSocket connections, CDC publish rate, Redis fan-out rate, replication lag), a critical-flow service graph, and end-to-end pipeline throughput / API latency panels](docs/images/fleet-system-overview.png)](docs/images/fleet-system-overview.png)
+
+*The **Fleet Observability Overview** — live fleet KPIs, the critical-flow service
+graph (`user → ingestion-api → db`, `cdc-consumer → frontend-api → replica`,
+`browser → frontend-api`), and end-to-end pipeline throughput / latency, all driven
+by the k6 fleet. One of eight dashboards, preloaded on `docker compose up`.*
+
+Every component emits OTLP to a single front door — **Grafana Alloy** — which
+fans **traces → Tempo** and **metrics → Prometheus**, both rendered in Grafana:
+
+```mermaid
+flowchart LR
+  ING["Ingestion API"] --> ALLOY
+  FE["Frontend API<br/>(REST + WS)"] --> ALLOY
+  CDC["CDC consumer"] --> ALLOY
+  RP["Replication probe"] --> ALLOY
+  WEB["Browser SPA<br/>@opentelemetry/sdk-trace-web"] -->|OTLP/HTTP + CORS| ALLOY
+  ALLOY["Grafana Alloy<br/>OTLP :4318"] -->|traces| TEMPO[("Tempo")]
+  ALLOY -->|metrics| PROM[("Prometheus")]
+  TEMPO --> GRAF["Grafana<br/>:3000"]
+  PROM --> GRAF
+```
+
+**What's instrumented** — traces *and* metrics, end to end:
+
+- **Ingestion / Frontend APIs** — FastAPI request spans, per-route rate / latency
+  / error metrics, and `CLIENT` spans on the Postgres write & replica reads.
+- **WebSocket layer** — a `/ws` lifecycle span, a live `frontend_ws_active_connections`
+  gauge, and a fan-out broadcast counter.
+- **CDC consumer** — WAL-decode and per-event publish (`PRODUCER`) spans, plus
+  event-throughput and decode-lag metrics.
+- **The async critical path is one connected trace.** The W3C `traceparent` is
+  threaded through the Redis event envelope, so a single telemetry write yields
+  **one trace** spanning `cdc.decode → cdc.publish → redis.subscribe (CONSUMER)
+  → ws.broadcast` — the CDC → Redis → WebSocket fan-out, stitched together in
+  Tempo. *(The ingestion→CDC hop is a deliberate trace-root break at the Postgres
+  WAL boundary — the envelope carries transport metadata, never application data.)*
+- **Streaming replication** — a small probe emits `pg_replication_lag_bytes` /
+  `pg_replication_lag_seconds` as custom OTel metrics.
+- **The browser** — the React SPA is instrumented with
+  `@opentelemetry/sdk-trace-web` (document-load + fetch/XHR) and propagates
+  `traceparent` onto its REST calls, so a page load is **one distributed trace
+  from the browser into the Frontend API** (`fleet-dashboard-web → frontend-api`).
+
+All instrumentation is **safe-by-default**: with no OTLP endpoint set, the
+bootstrap is a no-op, so local runs and the test suites need no collector.
+
+### Dashboards (auto-provisioned)
+
+| Dashboard | What it shows |
+|---|---|
+| **Fleet Observability Overview** | Top-level health + links to every flow + a **Tempo service-graph** of all critical flows (`ingestion→db`, `cdc→frontend`, `frontend→replica`, `browser→frontend`) |
+| **Ingestion API** | Request rate, p50/p95 latency, error rate, live ingestion traces |
+| **Frontend API & WebSockets** | REST rates/latency, active WebSocket connections, broadcast rate, frontend traces |
+| **CDC Consumer** | Event throughput by type, decode-lag quantiles, consumer traces |
+| **Pub/Sub** | Publish vs. subscribe/delivery rates, the connected cdc↔frontend trace |
+| **Redis Fan-out** | Fan-out delivery rate, active connections, dropped clients |
+| **Primary/Replica Streaming** | Replication lag (bytes & seconds) over time |
+| **Frontend Web (Browser)** | Browser traces — document load, REST fetch spans, browser→frontend-api join |
+
+> **Traces** flush within seconds; custom **metrics** export on a ~60 s OTLP
+> cadence (the Prometheus datasource is provisioned with `timeInterval: 60s` to
+> match), so metric panels settle a minute or so after boot. Tempo is pinned to
+> `2.7.2` (3.0 is distroless and can't run the shell healthcheck).
 
 ---
 
@@ -295,6 +381,8 @@ docs/ADR.md               # architecture decision record
 v2 · PostgreSQL 16 (logical replication, pgoutput) · Redis 7 · `uv`
 **Frontend** — React 18 · TypeScript · Vite · Vitest + Testing Library · nginx
 **Load** — Grafana k6 (stateful, continuous fleet simulation)
+**Observability** — OpenTelemetry (traces + metrics) → Grafana Alloy → Tempo +
+Prometheus → Grafana · `@opentelemetry/sdk-trace-web` in the browser
 **Infra** — Docker Compose: primary + streaming replica + Redis + singleton CDC
 
 ---

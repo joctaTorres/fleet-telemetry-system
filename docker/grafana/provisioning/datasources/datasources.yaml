@@ -1,0 +1,46 @@
+# Grafana datasource provisioning for the fleet telemetry observability backbone.
+#
+# Two datasources are declared with fixed, well-known uids so downstream
+# dashboard JSON (e.g. the "Ingestion API" dashboard from ingestion-dashboard)
+# can bind panels to them by uid rather than by Grafana's auto-generated ids —
+# making dashboards portable across `docker compose down/up`.
+#
+# All URLs resolve over the compose network (tempo:3200, prometheus:9090); no
+# credentials are written here. This file is mounted read-only into the grafana
+# container under /etc/grafana/provisioning/datasources.
+apiVersion: 1
+
+datasources:
+  # Traces. Panels and the Explore trace view select Tempo explicitly by uid.
+  - name: Tempo
+    type: tempo
+    uid: tempo
+    access: proxy
+    url: http://tempo:3200
+    isDefault: false
+    editable: false
+    # Bind the service map / node-graph to Prometheus by its pinned uid so
+    # Grafana resolves the Tempo-generated `traces_service_graph_*` series and can
+    # render the service graph in Explore (and downstream node-graph panels).
+    jsonData:
+      serviceMap:
+        datasourceUid: prometheus
+
+  # Metrics. Default datasource — metrics panels are the most common, so they
+  # bind to Prometheus implicitly while trace panels select Tempo by uid.
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    # The app SDKs export OTLP metrics on a ~60s periodic cadence, so a fresh
+    # remote-write sample lands roughly once a minute. Tell Grafana that effective
+    # interval via `timeInterval` so `$__rate_interval` (= max($__interval +
+    # scrape, 4 × scrape)) widens to ~4m instead of the 15s-scrape default ~1m.
+    # Without this, the dashboards' `rate(...[$__rate_interval])` panels span < 2
+    # samples on the default 15m view and render "No data" even though the series
+    # is live — the seam the clean-boot capstone surfaced.
+    jsonData:
+      timeInterval: 60s

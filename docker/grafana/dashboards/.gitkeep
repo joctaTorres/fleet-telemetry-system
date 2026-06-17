@@ -1,0 +1,3 @@
+# Target directory for the file-based Grafana dashboard provider.
+# Downstream changes (ingestion-dashboard) drop dashboard JSON here; this
+# placeholder keeps the directory present so it mounts cleanly while empty.

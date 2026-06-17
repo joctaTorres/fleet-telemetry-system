@@ -1,0 +1,3 @@
+# Empty alerting-provisioning dir. Mounting docker/grafana/provisioning over
+# Grafana's image default replaces the whole tree, so this placeholder keeps the
+# alerting/ subdir present and avoids a spurious "can't read directory" error.

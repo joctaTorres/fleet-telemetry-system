@@ -1,0 +1,254 @@
+# Batch manifest — declarative intent for a multi-change effort.
+#
+# A batch coordinates related changes across ordered phases. It references
+# changes by NAME and never owns them: changes live under .ratchet/changes/
+# like any other change and can be inspected, validated, and archived on their
+# own. Status is derived live from change state on disk — never stored here.
+#
+# Phases ship functional software behind an executable proof-of-work, so errors
+# surface early. A later phase is blocked until the prior phase's proof-of-work
+# passes. Changes are created lazily as the batch progresses: an entry with no
+# change directory yet is simply "pending", not an error.
+
+name: fleet-otel-observability
+created: 2026-06-17
+
+# Stack decisions (locked with the author):
+#   collector : Grafana Alloy  (OTLP receiver -> Tempo + Prometheus)
+#   traces    : Grafana Tempo
+#   metrics   : Prometheus
+#   infra     : app-emitted custom OTel metrics (no postgres/redis exporters)
+#   frontend  : @opentelemetry/sdk-trace-web (browser OTLP/HTTP -> Alloy)
+# End goal: `docker compose up` brings up Grafana with ALL dashboards
+# preloaded and real-time OTel data flowing, driven by the k6 fleet simulation.
+#
+# Project batch defaults are acceptable, so the `settings:` block is omitted.
+
+phases:
+  # ---------------------------------------------------------------------------
+  - name: ingestion-trace-backbone
+    goal: >-
+      Ship the thinnest end-to-end observability slice: stand up the
+      Alloy -> Tempo + Prometheus + Grafana backbone in docker-compose with
+      provisioned datasources, instrument the ingestion API (FastAPI) for OTLP
+      traces + request metrics, and provision one "Ingestion API" dashboard.
+      After `docker compose up`, the k6 fleet simulation drives POST /telemetry
+      and a user sees live ingestion spans in Tempo and live request-rate /
+      latency / error panels in Grafana — the full instrument -> pipeline ->
+      ingest -> analyze loop working for one real flow.
+    success: >-
+      From a clean `docker compose up` with k6 running, Grafana is healthy with
+      Tempo + Prometheus datasources provisioned, the "Ingestion API" dashboard
+      is auto-provisioned and populated, and Tempo contains traces for
+      service.name=ingestion-api originating from POST /telemetry.
+    proofOfWork:
+      kind: blackbox
+      run: >-
+        docker compose up -d --wait && sleep 60 &&
+        curl -sf http://localhost:3000/api/health &&
+        curl -sf -G http://localhost:3200/api/search
+          --data-urlencode 'tags=service.name=ingestion-api'
+          --data-urlencode 'limit=1' | jq -e '.traces | length > 0' &&
+        curl -sf -u admin:admin
+          'http://localhost:3000/api/search?query=Ingestion%20API'
+          | jq -e 'length > 0'
+      pass: >-
+        Command exits 0 — Grafana healthy, Tempo returns >=1 ingestion-api
+        trace, and the "Ingestion API" dashboard is provisioned.
+    changes:
+      - name: otel-bootstrap-python
+      - name: observability-stack-compose
+      - name: grafana-provisioning
+        after: [observability-stack-compose]
+      - name: instrument-ingestion-api
+        after: [otel-bootstrap-python, observability-stack-compose]
+      - name: ingestion-dashboard
+        after: [grafana-provisioning, instrument-ingestion-api]
+
+  # ---------------------------------------------------------------------------
+  - name: frontend-api-websockets
+    goal: >-
+      Instrument the frontend read API (FastAPI GET endpoints + replica reads)
+      and the /ws WebSocket lifecycle with OTLP traces and custom metrics
+      (active WebSocket connections gauge, broadcast counter), then provision a
+      "Frontend API & WebSockets" dashboard. Opening the React dashboard SPA (or
+      a WS client) makes the live connection count and REST request rates appear
+      in Grafana, with GET/WS traces in Tempo.
+    success: >-
+      With the stack up and at least one dashboard/WS client connected, the
+      "Frontend API & WebSockets" dashboard shows non-zero active WebSocket
+      connections and REST request rates, and Tempo contains traces for
+      service.name=frontend-api.
+    proofOfWork:
+      # Refined at phase entry (phase 1 done). Concrete: bring the stack up,
+      # hold a WebSocket client open against the frontend /ws, then assert the
+      # active-connections gauge, frontend-api traces, and the dashboard.
+      kind: blackbox
+      run: >-
+        docker compose up -d --wait && sleep 15 &&
+        python3 -c "import asyncio,websockets;
+        asyncio.run((lambda: (lambda ws: asyncio.sleep(25))(None)))" &
+        python3 -c "import asyncio,websockets,os;
+        async def m():
+          async with websockets.connect('ws://localhost:8002/ws') as w:
+            await asyncio.sleep(30)
+        asyncio.run(m())" &
+        sleep 18 &&
+        curl -sf -G http://localhost:3200/api/search
+          --data-urlencode 'tags=service.name=frontend-api'
+          --data-urlencode 'limit=1' | jq -e '.traces | length > 0' &&
+        curl -sf -G http://localhost:9090/api/v1/query
+          --data-urlencode 'query=max(frontend_ws_active_connections)'
+          | jq -e '.data.result[0].value[1] | tonumber > 0' &&
+        curl -sf -u admin:admin
+          'http://localhost:3000/api/search?query=Frontend%20API'
+          | jq -e 'length > 0'
+      pass: >-
+        While a WS client is connected: frontend_ws_active_connections > 0 in
+        Prometheus AND Tempo returns >=1 service.name=frontend-api trace AND the
+        "Frontend API & WebSockets" dashboard is provisioned. (Exact gauge name
+        may be adjusted by the apply agent to match the OTLP->remote-write
+        translation; keep the query in sync with the shipped metric.)
+    changes:
+      - name: instrument-frontend-api
+      - name: instrument-websocket-lifecycle
+        after: [instrument-frontend-api]
+      - name: frontend-api-dashboard
+        after: [instrument-websocket-lifecycle]
+
+  # ---------------------------------------------------------------------------
+  - name: cdc-pubsub-redis-flow
+    goal: >-
+      Make the asynchronous critical path one connected distributed trace.
+      Instrument the CDC consumer (WAL decode spans, per-event publish span),
+      inject W3C trace context into the Redis pub/sub event envelope, and link
+      the frontend's Redis subscribe + WebSocket broadcast spans so a single k6
+      telemetry write yields ONE Tempo trace spanning
+      ingestion -> cdc-consumer -> redis publish -> frontend subscribe -> WS
+      broadcast. Provision "CDC Consumer", "Pub/Sub", and "Redis Fan-out"
+      dashboards (event throughput, decode lag, publish/subscribe counts,
+      fan-out delivery, dropped clients).
+    success: >-
+      A k6-driven telemetry write produces a single Tempo trace containing
+      spans from BOTH cdc-consumer and frontend-api services, and the CDC,
+      Pub/Sub, and Redis fan-out dashboards populate with live data.
+    proofOfWork:
+      # Refined at phase entry (phases 1-2 done). The verifiable core is the
+      # Redis-propagated connected trace: a CDC publish span and the frontend
+      # subscribe/broadcast spans share ONE trace via the W3C traceparent
+      # carried in the event envelope. (Linking the upstream ingestion write
+      # across Postgres logical replication is best-effort, not required.)
+      kind: blackbox
+      run: >-
+        docker compose up -d --wait && sleep 75 &&
+        curl -sf -G http://localhost:3200/api/search
+          --data-urlencode 'q={ resource.service.name="cdc-consumer" } && { resource.service.name="frontend-api" }'
+          --data-urlencode 'limit=1' | jq -e '.traces | length > 0' &&
+        for d in 'CDC%20Consumer' 'Pub%2FSub' 'Redis%20Fan-out'; do
+          curl -sf -u admin:admin "http://localhost:3000/api/search?query=$d"
+            | jq -e 'length > 0' || exit 1; done
+      pass: >-
+        Tempo returns >=1 trace whose spans include BOTH
+        resource.service.name=cdc-consumer and =frontend-api (one connected
+        trace via the Redis traceparent) AND the "CDC Consumer", "Pub/Sub", and
+        "Redis Fan-out" dashboards are each provisioned and show live data.
+    changes:
+      - name: instrument-cdc-consumer
+      - name: propagate-trace-context-redis
+        after: [instrument-cdc-consumer]
+      - name: cdc-pubsub-redis-dashboards
+        after: [propagate-trace-context-redis]
+
+  # ---------------------------------------------------------------------------
+  - name: replication-and-browser-traces
+    goal: >-
+      Close the two remaining flows. Emit a custom OTel metric for streaming
+      replication lag (a small Python probe over pg_stat_replication /
+      pg_last_wal_replay_lsn on primary + replica) and provision a
+      "Primary/Replica Streaming" dashboard. Instrument the React dashboard with
+      @opentelemetry/sdk-trace-web (document load, fetch/XHR for the REST
+      snapshot calls, WebSocket connect) exporting OTLP/HTTP to Alloy (with CORS
+      handled), producing browser -> frontend-api distributed traces, and
+      provision a "Frontend Web (Browser)" dashboard.
+    success: >-
+      The replication dashboard shows live lag (bytes/seconds), browser traces
+      appear in Tempo as service.name=fleet-dashboard-web and join to
+      frontend-api spans, and the browser web dashboard populates after loading
+      the SPA.
+    proofOfWork:
+      # Refined at phase entry (phases 1-3 done). Replication lag is fully
+      # automatable via Prometheus. Browser traces require a real headless
+      # browser load of the SPA (curl can't execute the JS SDK) — the apply
+      # agent picks the mechanism (Playwright MCP, npx playwright, or a
+      # docker'd chromium) and may adjust the exact lag metric name.
+      kind: blackbox
+      run: >-
+        docker compose up -d --wait && sleep 20 &&
+        curl -sf -G http://localhost:9090/api/v1/query
+          --data-urlencode 'query=max(pg_replication_lag_bytes)'
+          | jq -e '.data.result[0].value[1] != null' &&
+        (load http://localhost:8080 in a headless browser so the
+         @opentelemetry/sdk-trace-web SDK emits document-load + fetch spans) &&
+        sleep 15 &&
+        curl -sf -G http://localhost:3200/api/search
+          --data-urlencode 'tags=service.name=fleet-dashboard-web'
+          --data-urlencode 'limit=1' | jq -e '.traces | length > 0' &&
+        for d in 'Primary%2FReplica%20Streaming' 'Frontend%20Web'; do
+          curl -sf -u admin:admin "http://localhost:3000/api/search?query=$d"
+            | jq -e 'length > 0' || exit 1; done
+      pass: >-
+        Prometheus exposes a replication-lag time series (bytes and/or seconds)
+        AND, after a real browser loads the SPA, Tempo returns >=1
+        service.name=fleet-dashboard-web trace (ideally joined to frontend-api
+        via traceparent on the fetch calls) AND both the "Primary/Replica
+        Streaming" and "Frontend Web (Browser)" dashboards are provisioned and
+        populate.
+    changes:
+      - name: replication-lag-metric
+      - name: replication-dashboard
+        after: [replication-lag-metric]
+      - name: instrument-browser-web
+      - name: browser-web-dashboard
+        after: [instrument-browser-web]
+
+  # ---------------------------------------------------------------------------
+  - name: all-dashboards-preloaded-capstone
+    goal: >-
+      Deliver the end goal as a single experience: a clean `docker compose up`
+      brings the entire stack with ALL required dashboards preloaded and
+      real-time OTel data flowing from the k6 fleet simulation. Add a top-level
+      "Fleet Observability Overview" dashboard linking every flow and a Tempo
+      service-graph view of all critical flows, and confirm nothing requires
+      manual import or post-up wiring.
+    success: >-
+      From a fresh `docker compose up` (no manual steps), every required
+      dashboard — Ingestion API, Frontend API & WebSockets, CDC Consumer,
+      Pub/Sub, Redis Fan-out, Primary/Replica Streaming, Frontend Web (Browser),
+      and the Overview — is auto-provisioned and populated with live k6-driven
+      data, and all critical flows are visible end to end in Tempo.
+    proofOfWork:
+      # Refined at phase entry (phases 1-4 done). The capstone change runs this
+      # judged clean-boot end-goal acceptance; the Docker VM is now 4 GiB so the
+      # whole stack + k6 + Tempo can stay healthy at once.
+      kind: llm-judge
+      run: >-
+        From a clean state (`docker compose down -v` then `docker compose up -d
+        --wait`), let k6 drive load ~90s, load the SPA once in a headless
+        browser, then gather: Grafana dashboard list (`/api/search?type=dash-db`
+        — expect all 8 titles), each dashboard's panel data, the Tempo
+        service-graph metrics (`traces_service_graph_request_total`) and a
+        connected ingestion/cdc/redis/frontend + browser trace, and dashboard
+        screenshots. Have the judge assess whether the end goal holds.
+      pass: >-
+        Judge confirms all 8 dashboards (Ingestion API, Frontend API &
+        WebSockets, CDC Consumer, Pub/Sub, Redis Fan-out, Primary/Replica
+        Streaming, Frontend Web (Browser), Fleet Observability Overview) are
+        auto-preloaded and showing real-time k6-driven data, the Tempo
+        service-graph covers all critical flows, and all flows are traceable end
+        to end — with zero manual setup beyond `docker compose up`.
+    changes:
+      - name: tempo-service-graph
+      - name: fleet-overview-dashboard
+        after: [tempo-service-graph]
+      - name: capstone-clean-boot-verify
+        after: [fleet-overview-dashboard]
