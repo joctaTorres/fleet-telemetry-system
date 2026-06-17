@@ -20,7 +20,28 @@ STATUSES: tuple[VehicleStatus, ...] = ("idle", "moving", "charging", "fault")
 #: startup so every zone has a stable counter row to increment and read back —
 #: a read of per-zone counts always reports all of these, even never-entered
 #: zones (which report 0).
-ZONES: tuple[str, ...] = tuple(f"zone-{i:02d}" for i in range(1, 21))
+ZONES: tuple[str, ...] = (
+    "inbound_dock_a",
+    "inbound_dock_b",
+    "receiving_staging",
+    "aisle_a",
+    "aisle_b",
+    "aisle_c",
+    "high_bay_1",
+    "high_bay_2",
+    "bulk_storage",
+    "pick_zone_1",
+    "pick_zone_2",
+    "pack_station",
+    "sort_belt",
+    "outbound_dock_a",
+    "outbound_dock_b",
+    "shipping_staging",
+    "charging_bay_1",
+    "charging_bay_2",
+    "charging_bay_3",
+    "maintenance_bay",
+)
 
 #: Default anomaly-detection thresholds (agreed in the phase success criteria).
 #: Comparisons are strict, so a threshold-exact value does not fire.

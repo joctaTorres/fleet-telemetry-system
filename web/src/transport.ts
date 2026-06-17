@@ -121,14 +121,36 @@ function defaultWsUrl(): string {
 }
 
 /**
+ * Build-time override for the REST base URL. When the dashboard is built and
+ * served by the runtime stack, the `dashboard` compose service injects
+ * `VITE_API_BASE_URL` (e.g. `http://localhost:8002`) so the browser reaches the
+ * runtime frontend API. Unset in dev/test, so the same-origin default holds and
+ * the Vite proxy / existing unit tests are unaffected. No host/port is in source.
+ */
+function envApiBaseUrl(): string | undefined {
+  const v = import.meta.env?.VITE_API_BASE_URL;
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/** Build-time override for the WS URL (`VITE_WS_URL`); see {@link envApiBaseUrl}. */
+function envWsUrl(): string | undefined {
+  const v = import.meta.env?.VITE_WS_URL;
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/**
  * The production transport: REST snapshot via `fetch('/vehicles')` (once), live
  * patches via a `WebSocket('/ws')`. Each socket message is JSON-parsed and run
  * through {@link parsePatch}; unknown/malformed types are dropped silently. No
  * interval, no refetch — the only source of updates after load is the socket.
  */
 export function createHttpTransport(opts: HttpTransportOptions = {}): Transport {
-  const baseUrl = opts.baseUrl ?? "";
-  const wsUrl = opts.wsUrl ?? defaultWsUrl();
+  // Resolution order: explicit option (tests) → build-time VITE_* env (runtime
+  // served dashboard) → same-origin default (dev / unit tests). The env values
+  // are additive overrides only, so the same-origin default is unchanged when
+  // they are absent and existing tests / `npm run dev` stay green.
+  const baseUrl = opts.baseUrl ?? envApiBaseUrl() ?? "";
+  const wsUrl = opts.wsUrl ?? envWsUrl() ?? defaultWsUrl();
   const fetchFn = opts.fetchFn ?? fetch;
   const WS = opts.WebSocketImpl ?? WebSocket;
 

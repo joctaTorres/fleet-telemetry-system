@@ -120,7 +120,7 @@ def test_zone_entry_delivers_zone_count_changed(
                 "vehicle_id": "rt-zone",
                 "status": "moving",
                 "battery_pct": 80,
-                "zone_entered": "zone-07",
+                "zone_entered": "high_bay_1",
             },
         )
         assert resp.status_code == 201
@@ -129,7 +129,7 @@ def test_zone_entry_delivers_zone_count_changed(
         # Filtering on the incremented value also skips the cleanup reset deltas.
         event = reader.matching(
             lambda e: e["type"] == ZONE_COUNT_CHANGED
-            and e["payload"]["zone_id"] == "zone-07"
+            and e["payload"]["zone_id"] == "high_bay_1"
             and e["payload"]["entry_count"] == 1,
             SUB_SECOND,
         )
@@ -137,7 +137,7 @@ def test_zone_entry_delivers_zone_count_changed(
         ws.__exit__(None, None, None)
 
     assert event is not None
-    assert event["payload"] == {"zone_id": "zone-07", "entry_count": 1}
+    assert event["payload"] == {"zone_id": "high_bay_1", "entry_count": 1}
 
 
 def test_low_battery_post_delivers_anomaly_detected(
@@ -174,19 +174,19 @@ def test_rolled_back_write_delivers_no_event(frontend: TestClient):
     """
     ws, reader = _connect_ready_ws(frontend)
     try:
-        # Abort an increment on zone-11; logical decoding frames on Commit, so an
-        # uncommitted change is never decoded and no zone-11 delta should appear.
+        # Abort an increment on pick_zone_2; logical decoding frames on Commit, so an
+        # uncommitted change is never decoded and no pick_zone_2 delta should appear.
         with psycopg.connect(get_dsn()) as conn:
             conn.execute(
                 "UPDATE zone_counts SET entry_count = entry_count + 1 "
                 "WHERE zone_id = %(zone_id)s",
-                {"zone_id": "zone-11"},
+                {"zone_id": "pick_zone_2"},
             )
             conn.rollback()
 
         spurious = reader.matching(
             lambda e: e["type"] == ZONE_COUNT_CHANGED
-            and e["payload"]["zone_id"] == "zone-11",
+            and e["payload"]["zone_id"] == "pick_zone_2",
             SUB_SECOND,
         )
         assert spurious is None
@@ -195,11 +195,11 @@ def test_rolled_back_write_delivers_no_event(frontend: TestClient):
         _commit(
             "UPDATE zone_counts SET entry_count = entry_count + 1 "
             "WHERE zone_id = %(zone_id)s",
-            {"zone_id": "zone-11"},
+            {"zone_id": "pick_zone_2"},
         )
         sentinel = reader.matching(
             lambda e: e["type"] == ZONE_COUNT_CHANGED
-            and e["payload"]["zone_id"] == "zone-11",
+            and e["payload"]["zone_id"] == "pick_zone_2",
             SUB_SECOND,
         )
     finally:

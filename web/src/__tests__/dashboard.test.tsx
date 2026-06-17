@@ -48,9 +48,34 @@ function anomalySnapshot(): AnomalySnapshotRow[] {
   return rows;
 }
 
+// The realistic warehouse zone ids, in the same order as app.models.ZONES, so the
+// seeded snapshot uses real ids and a tile's seed count is its index in this list.
+const ZONE_IDS = [
+  "inbound_dock_a",
+  "inbound_dock_b",
+  "receiving_staging",
+  "aisle_a",
+  "aisle_b",
+  "aisle_c",
+  "high_bay_1",
+  "high_bay_2",
+  "bulk_storage",
+  "pick_zone_1",
+  "pick_zone_2",
+  "pack_station",
+  "sort_belt",
+  "outbound_dock_a",
+  "outbound_dock_b",
+  "shipping_staging",
+  "charging_bay_1",
+  "charging_bay_2",
+  "charging_bay_3",
+  "maintenance_bay",
+];
+
 function zoneSnapshot(n: number): ZoneCountsSnapshot {
   const zones: ZoneCountsSnapshot = {};
-  for (let i = 0; i < n; i++) zones[`zone-${String(i).padStart(2, "0")}`] = i;
+  for (let i = 0; i < n; i++) zones[ZONE_IDS[i]] = i;
   return zones;
 }
 
@@ -146,7 +171,7 @@ describe("live dashboard", () => {
 
     // one tile per seeded zone, each showing its count.
     expect(screen.getAllByTestId(/^zone-tile-/)).toHaveLength(20);
-    expect(screen.getByTestId("zone-count-zone-05")).toHaveTextContent("5");
+    expect(screen.getByTestId("zone-count-aisle_b")).toHaveTextContent("4");
 
     // each snapshot fetched exactly once...
     expect(mock.fetchSnapshot).toHaveBeenCalledTimes(1);
@@ -211,18 +236,18 @@ describe("live dashboard", () => {
     await act(async () => {
       mock.emit({
         type: "zone_count_changed",
-        payload: { zone_id: "zone-05", entry_count: 999 },
+        payload: { zone_id: "aisle_b", entry_count: 999 },
       });
       await Promise.resolve();
     });
 
     // the patched tile reflects the new count...
-    expect(screen.getByTestId("zone-count-zone-05")).toHaveTextContent("999");
+    expect(screen.getByTestId("zone-count-aisle_b")).toHaveTextContent("999");
     // ...and ONLY that tile re-rendered; no other tile, no vehicle row.
-    expect(tiles.get("zone-05")).toBe((tileBaseline.get("zone-05") ?? 0) + 1);
+    expect(tiles.get("aisle_b")).toBe((tileBaseline.get("aisle_b") ?? 0) + 1);
     let otherTiles = 0;
     for (const [id, count] of tiles) {
-      if (id !== "zone-05" && count !== tileBaseline.get(id)) otherTiles++;
+      if (id !== "aisle_b" && count !== tileBaseline.get(id)) otherTiles++;
     }
     expect(otherTiles).toBe(0);
     expect(deltaCount(rows, rowBaseline)).toBe(0);
@@ -241,7 +266,7 @@ describe("live dashboard", () => {
     await act(async () => {
       mock.emit({
         type: "zone_count_changed",
-        payload: { zone_id: "zone-99", entry_count: 7 },
+        payload: { zone_id: "unknown_zone_x", entry_count: 7 },
       });
       mock.emit({
         type: "anomaly_detected",
@@ -255,7 +280,7 @@ describe("live dashboard", () => {
       await Promise.resolve();
     });
     expect(screen.getAllByTestId(/^zone-tile-/)).toHaveLength(20);
-    expect(screen.queryByTestId("zone-tile-zone-99")).toBeNull();
+    expect(screen.queryByTestId("zone-tile-unknown_zone_x")).toBeNull();
     expect(screen.getAllByTestId(/^vehicle-row-/)).toHaveLength(50);
     expect(screen.queryByTestId("vehicle-row-vehicle-999")).toBeNull();
     expect(deltaCount(tiles, tileBaseline)).toBe(0);
@@ -266,11 +291,11 @@ describe("live dashboard", () => {
     await act(async () => {
       mock.emit({
         type: "zone_count_changed",
-        payload: { zone_id: "zone-08", entry_count: 100 },
+        payload: { zone_id: "high_bay_2", entry_count: 100 },
       });
       mock.emit({
         type: "zone_count_changed",
-        payload: { zone_id: "zone-08", entry_count: 200 },
+        payload: { zone_id: "high_bay_2", entry_count: 200 },
       });
       mock.emit({
         type: "anomaly_detected",
@@ -292,12 +317,12 @@ describe("live dashboard", () => {
       });
       await Promise.resolve();
     });
-    expect(screen.getByTestId("zone-count-zone-08")).toHaveTextContent("200");
+    expect(screen.getByTestId("zone-count-high_bay_2")).toHaveTextContent("200");
     expect(screen.getByTestId("anomaly-vehicle-010")).toHaveTextContent(
       "fault_status",
     );
     // neighbours untouched.
-    expect(screen.getByTestId("zone-count-zone-07")).toHaveTextContent("7");
+    expect(screen.getByTestId("zone-count-high_bay_1")).toHaveTextContent("6");
     expect(screen.getByTestId("anomaly-vehicle-005")).toHaveTextContent(
       "low_battery",
     );

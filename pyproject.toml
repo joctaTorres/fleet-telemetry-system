@@ -9,6 +9,8 @@ dependencies = [
     "pydantic>=2.7",
     "fastapi>=0.115",
     "redis>=8.0.0",
+    "uvicorn>=0.49.0",
+    "websockets>=12",
 ]
 
 [dependency-groups]

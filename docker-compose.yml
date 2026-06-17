@@ -1,0 +1,213 @@
+# Runtime stack: ONE `docker compose up` at the repo root serves the full fleet
+# telemetry system for real use — separate from, and leaving untouched, the
+# `docker-compose.test.yml` pytest/vitest harness.
+#
+# Topology (telemetry-architecture standard, reused unchanged):
+#   db        Postgres primary, wal_level=logical (physical streaming + the CDC
+#             logical slot). Writes land here via the ingestion API.
+#   replica   streaming hot standby (pg_basebackup bootstrap). The frontend API
+#             serves every REST read and the connect snapshot from here, never
+#             the primary.
+#   redis     pub/sub broker — the single CDC consumer's only fan-out path.
+#   migrate   one-shot `python -m app.migrate`: applies versioned migrations and
+#             seeds one zone_counts row per id in app.models.ZONES, then exits.
+#             The APIs and CDC depend on it completing successfully.
+#   cdc       the singleton `python -m app.cdc_consumer`: tails the primary's
+#             pgoutput logical slot and publishes derived events to Redis.
+#   ingestion uvicorn serving app.ingestion_api:app (stateless write path).
+#   frontend  uvicorn serving app.frontend_api:app (reads from replica + WS).
+#   dashboard the built Vite/React/TS app, served on a host port, wired to the
+#             frontend API host port via VITE_API_BASE_URL / VITE_WS_URL.
+#   k6        grafana/k6 load generator firing on `up` — a stateful 50-vehicle
+#             1 Hz fleet driving real load through the served APIs.
+#
+# Every connection string is read from the environment with no credentials baked
+# into application source. The values below are compose-network, single-host
+# defaults overridable via the environment; the durable named volumes mean the
+# database survives a restart (unlike the test harness's tmpfs).
+services:
+  db:
+    image: postgres:16-alpine
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fleet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fleet}
+      POSTGRES_DB: ${POSTGRES_DB:-fleet}
+    volumes:
+      # Adds the `host replication ... trust` pg_hba rule so the replica streams.
+      - ./docker/primary-init:/docker-entrypoint-initdb.d:ro
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fleet} -d ${POSTGRES_DB:-fleet}"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  replica:
+    image: postgres:16-alpine
+    entrypoint: ["/bin/sh", "/replica-entrypoint.sh"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fleet}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fleet}
+      PRIMARY_HOST: db
+      PRIMARY_PORT: "5432"
+    volumes:
+      - ./docker/replica-entrypoint.sh:/replica-entrypoint.sh:ro
+      - replica-data:/var/lib/postgresql/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fleet} -d ${POSTGRES_DB:-fleet}"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+
+  redis:
+    image: redis:7-alpine
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # One-shot migrate + zone seed against the primary. Runs to completion and
+  # exits 0; the APIs and CDC gate on `service_completed_successfully` so the
+  # schema and all 20 realistic zone rows exist before anything serves.
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.migrate"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@db:5432/${POSTGRES_DB:-fleet}
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  cdc:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.cdc_consumer"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@db:5432/${POSTGRES_DB:-fleet}
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  ingestion:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      ["uvicorn", "app.ingestion_api:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@db:5432/${POSTGRES_DB:-fleet}
+    ports:
+      - "${INGESTION_PORT:-8001}:8001"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      # The ingestion app exposes no GET; a 404/405 on / still proves it serves.
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8001/openapi.json').status==200 else 1)\"",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command:
+      ["uvicorn", "app.frontend_api:app", "--host", "0.0.0.0", "--port", "8002"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@db:5432/${POSTGRES_DB:-fleet}
+      REPLICA_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@replica:5432/${POSTGRES_DB:-fleet}
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "${FRONTEND_PORT:-8002}:8002"
+    depends_on:
+      db:
+        condition: service_healthy
+      replica:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8002/vehicles').status==200 else 1)\"",
+        ]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # The built dashboard, served on a host port. The build bakes in the frontend
+  # API host URL + WS URL via VITE_* build args; no host/port is hard-coded in
+  # source. Browser-origin URLs (localhost:<host port>), since the browser, not a
+  # compose-network container, reaches the frontend API.
+  dashboard:
+    build:
+      context: ./web
+      dockerfile: Dockerfile.runtime
+      args:
+        VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8002}
+        VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8002/ws}
+    ports:
+      - "${DASHBOARD_PORT:-8080}:80"
+    depends_on:
+      frontend:
+        condition: service_healthy
+
+  # k6 fires on `up` and drives a CONTINUOUS load. Each of 50 VUs owns one vehicle
+  # and streams ~1 Hz stateful telemetry through the ingestion API, reading back
+  # through the frontend API — the `constant-vus` executor runs for an effectively
+  # unbounded duration so the fleet keeps driving for as long as the stack is up.
+  # Targets are passed as env (no hard-coded hosts). A breached threshold exits
+  # non-zero so a regression surfaces. `restart: unless-stopped` keeps the load
+  # generator running (and reconnecting) for the life of the stack.
+  k6:
+    image: grafana/k6:latest
+    volumes:
+      - ./k6:/scripts:ro
+    environment:
+      INGESTION_BASE_URL: http://ingestion:8001
+      FRONTEND_BASE_URL: http://frontend:8002
+    command: ["run", "/scripts/fleet-simulation.js"]
+    restart: unless-stopped
+    depends_on:
+      ingestion:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+
+volumes:
+  db-data:
+  replica-data:
+  redis-data:

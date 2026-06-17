@@ -76,14 +76,14 @@ def test_zone_increment_yields_one_zone_count_changed(cdc_stream):
     _commit(
         "UPDATE zone_counts SET entry_count = entry_count + 1 "
         "WHERE zone_id = %(zone_id)s",
-        {"zone_id": "zone-01"},
+        {"zone_id": "inbound_dock_a"},
     )
 
     event = cdc_stream.read_next(SUB_SECOND)
     assert event is not None
     assert event["type"] == ZONE_COUNT_CHANGED
     # Counters are reset to 0 before each test, so the increment yields exactly 1.
-    assert event["payload"] == {"zone_id": "zone-01", "entry_count": 1}
+    assert event["payload"] == {"zone_id": "inbound_dock_a", "entry_count": 1}
     assert cdc_stream.read_next(0.5) is None
 
 
@@ -104,7 +104,7 @@ def test_each_envelope_carries_its_contract_type(cdc_stream):
     _commit(
         "UPDATE zone_counts SET entry_count = entry_count + 1 "
         "WHERE zone_id = %(zone_id)s",
-        {"zone_id": "zone-02"},
+        {"zone_id": "inbound_dock_b"},
     )
     assert cdc_stream.read_next(SUB_SECOND)["type"] == ZONE_COUNT_CHANGED
 
@@ -119,14 +119,14 @@ def test_rolled_back_write_yields_no_event(cdc_stream):
     rolled_back_primary_write(
         "UPDATE zone_counts SET entry_count = entry_count + 1 "
         "WHERE zone_id = %(zone_id)s",
-        {"zone_id": "zone-03"},
+        {"zone_id": "receiving_staging"},
     )
     assert cdc_stream.read_next(SUB_SECOND) is None
 
     _commit(
         "UPDATE zone_counts SET entry_count = entry_count + 1 "
         "WHERE zone_id = %(zone_id)s",
-        {"zone_id": "zone-03"},
+        {"zone_id": "receiving_staging"},
     )
     sentinel = cdc_stream.read_next(SUB_SECOND)
     assert sentinel is not None
@@ -146,7 +146,7 @@ def test_non_watched_table_write_yields_no_event(cdc_stream):
     _commit(
         "UPDATE zone_counts SET entry_count = entry_count + 1 "
         "WHERE zone_id = %(zone_id)s",
-        {"zone_id": "zone-04"},
+        {"zone_id": "aisle_a"},
     )
     assert cdc_stream.read_next(SUB_SECOND)["type"] == ZONE_COUNT_CHANGED
 

@@ -333,7 +333,11 @@ def _as_int(value: object) -> int | None:
 # ── long-lived supervisor (the standalone ``cdc`` service) ──────────────────
 #: Restart backoff bounds. Short enough that the startup window (publication /
 #: watched tables not yet migrated when the service comes up) is absorbed
-#: quickly; capped so a prolonged primary outage does not hot-loop.
+#: quickly; capped so a prolonged primary outage does not hot-loop. The retry
+#: itself is **unbounded in count and time** — the supervisor loops until ``stop``
+#: and never exhausts attempts or exits, so a publication, slot, or table that
+#: appears late, or a transient primary/stream error, is always recovered from
+#: rather than the consumer going silent after one failed start.
 _BACKOFF_INITIAL = 0.5
 _BACKOFF_MAX = 10.0
 
@@ -363,53 +367,93 @@ def run_forever(stop: threading.Event | None = None) -> None:
     """Run the singleton CDC consumer as a long-lived, supervised process.
 
     Loops ``ensure_slot()`` + ``CdcConsumer().run(stop)``, restarting the stream
-    with bounded exponential backoff on any transient failure. The most important
-    case is the window at container start: the ``cdc`` service comes up at compose
-    time, before migrations run, so the publication and watched tables may not
+    on any transient failure. The retry is **unbounded** — the supervisor keeps
+    trying until ``stop`` is set and never exhausts its attempts or exits, so it
+    recovers whenever the underlying condition clears rather than going silent
+    after a single failed start. The backoff between attempts is bounded short
+    (capped at ``_BACKOFF_MAX``) only so a prolonged outage does not hot-loop; it
+    never gates *whether* another attempt happens.
+
+    The most important case is the cold-start window: the ``cdc`` service may come
+    up before migrations finish, so the publication and watched tables may not
     exist yet. The supervisor waits (without creating the slot) until the
     publication exists — anchoring the slot ahead of it would wedge decoding on
-    pre-publication WAL — then creates the slot and streams. A transient failure
-    or primary blip mid-stream is retried the same way. Returns only when ``stop``
-    is set (clean shutdown).
+    pre-publication WAL — then creates the slot and streams. A late/missing slot
+    or table, an unreachable primary, or a blip mid-stream is retried the same
+    way. Every wait and every restart is logged so the service is never silent.
+    Returns only when ``stop`` is set (clean shutdown).
 
     Adds **no** decode/translate/publish logic — it is purely the process wrapper
     around the proven :class:`CdcConsumer`.
     """
     if stop is None:
         stop = threading.Event()
-    backoff = _BACKOFF_INITIAL
+    # The readiness wait uses a tight, capped backoff so a publication/table that
+    # migrates a moment after the service starts is absorbed quickly. A failed
+    # *stream* attempt grows the backoff toward the cap (so a sustained outage
+    # does not hot-loop) but resets the moment a stream actually started, so a
+    # transient mid-stream blip is retried promptly.
+    ready_backoff = _BACKOFF_INITIAL
+    stream_backoff = _BACKOFF_INITIAL
     while not stop.is_set():
+        # ── Readiness probe: never exits on a missing publication / unreachable
+        # primary; just keeps re-checking with a short bounded backoff. ──
         try:
             ready = _publication_exists()
         except Exception as err:  # noqa: BLE001 - primary not reachable yet
-            log.warning("cannot reach primary to check publication: %s", err)
+            log.warning(
+                "cannot reach primary to check publication %s (will retry): %s",
+                PUBLICATION_NAME,
+                err,
+            )
             ready = False
         if not ready:
             log.info(
-                "publication %s not present yet; waiting before streaming",
+                "publication %s not present yet; retrying in %.1fs",
                 PUBLICATION_NAME,
+                ready_backoff,
             )
-            if stop.wait(backoff):
+            if stop.wait(ready_backoff):
                 break
-            backoff = min(backoff * 2, _BACKOFF_MAX)
+            ready_backoff = min(ready_backoff * 2, _BACKOFF_MAX)
             continue
+        # Publication is present — reset the readiness backoff so a later
+        # publication drop/recreate is again absorbed quickly.
+        ready_backoff = _BACKOFF_INITIAL
 
+        # ── Stream attempt: any failure (a slot/table that is still appearing, a
+        # primary blip, a transient stream error) is logged and retried; it never
+        # escapes or ends the loop. ──
         consumer = CdcConsumer()
         try:
             ensure_slot()
+            log.info("CDC consumer streaming slot %s", SLOT_NAME)
             consumer.run(stop)
         except Exception as err:  # noqa: BLE001 - supervise: log and retry
-            log.warning("CDC consumer stream failed, restarting: %s", err)
+            log.warning(
+                "CDC consumer stream failed, restarting in %.1fs: %s",
+                _BACKOFF_INITIAL if consumer.streaming.is_set() else stream_backoff,
+                err,
+            )
+        else:
+            # run() returned without raising: either a clean stop, or the stream
+            # ended on its own — retry from the short backoff in the latter case.
+            if not stop.is_set():
+                log.info(
+                    "CDC consumer stream ended; restarting in %.1fs",
+                    _BACKOFF_INITIAL,
+                )
         if stop.is_set():
             break
         # A consumer that actually started streaming before failing hit a
         # transient mid-stream error: reset to the short backoff. One that never
-        # streamed keeps growing its backoff.
+        # streamed (slot/table still appearing) grows its backoff toward the cap —
+        # but the loop always continues, so the retry is unbounded.
         if consumer.streaming.is_set():
-            backoff = _BACKOFF_INITIAL
-        if stop.wait(backoff):
+            stream_backoff = _BACKOFF_INITIAL
+        if stop.wait(stream_backoff):
             break
-        backoff = min(backoff * 2, _BACKOFF_MAX)
+        stream_backoff = min(stream_backoff * 2, _BACKOFF_MAX)
 
 
 def _install_signal_handlers(stop: threading.Event) -> None:
