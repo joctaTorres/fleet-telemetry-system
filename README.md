@@ -10,12 +10,14 @@ WebSocket — derived from the Postgres WAL, with **no dual-write**.
 > **concurrency correctness** — lost-update-free counters, atomic multi-table
 > fault handling, a consistent aggregate — plus delivering changes to the
 > dashboard with low latency without coupling the write path to the read path.
-> Architecture rationale lives in [`docs/ADR.md`](docs/ADR.md).
+
+Architecture rationale lives in [`docs/ADR.md`](docs/ADR.md)
+
+AI Build log [`docs/ai-build-logs/`](docs/ai-build-logs/index.md)
+
+**Built with [Ratchet](https://github.com/joctaTorres/ratchet)** ⚙️⚙️
 
 ---
-
-
-⚙️⚙️ Built with [ratchet harness](https://github.com/joctaTorres/ratchet) ⚙️⚙️
 
 ## ⚡ Quick start — run it end to end
 
