@@ -64,6 +64,12 @@ export type PatchEvent =
 
 export type PatchHandler = (event: PatchEvent) => void;
 
+// Local constants so this file does not depend on the global `WebSocket` constructor
+// being present at evaluation time (tests inject a FakeWebSocket and may lack a
+// global WebSocket object).
+const WS_OPEN = 1;
+const WS_CLOSED = 3;
+
 /**
  * The data seam the UI depends on. Implementations: {@link createHttpTransport}
  * in the running app, a mock in tests.
@@ -81,6 +87,13 @@ export interface Transport {
    * seed the zone store before the live stream takes over.
    */
   fetchZones(): Promise<ZoneCountsSnapshot>;
+  /** Current WebSocket readyState (or closed), for the connection indicator. */
+  readonly readyState?: number;
+  /**
+   * Subscribe to WebSocket open/close changes for the connection indicator.
+   * Optional for test mocks.
+   */
+  onConnectionChange?(callback: (connected: boolean) => void): () => void;
   /** Open the live patch stream; returns an unsubscribe/close function. */
   subscribe(handler: PatchHandler): () => void;
 }
@@ -154,6 +167,15 @@ export function createHttpTransport(opts: HttpTransportOptions = {}): Transport 
   const fetchFn = opts.fetchFn ?? fetch;
   const WS = opts.WebSocketImpl ?? WebSocket;
 
+  let socket: WebSocket | undefined;
+  const connectionListeners = new Set<(connected: boolean) => void>();
+
+  function notifyConnection(connected: boolean) {
+    for (const cb of connectionListeners) {
+      cb(connected);
+    }
+  }
+
   return {
     async fetchSnapshot(): Promise<VehicleSnapshotRow[]> {
       const res = await fetchFn(`${baseUrl}/vehicles`);
@@ -167,8 +189,18 @@ export function createHttpTransport(opts: HttpTransportOptions = {}): Transport 
       const res = await fetchFn(`${baseUrl}/zones/counts`);
       return (await res.json()) as ZoneCountsSnapshot;
     },
+    get readyState() {
+      return socket?.readyState ?? WS_CLOSED;
+    },
+    onConnectionChange(callback) {
+      connectionListeners.add(callback);
+      callback(socket ? socket.readyState === WS_OPEN : false);
+      return () => {
+        connectionListeners.delete(callback);
+      };
+    },
     subscribe(handler: PatchHandler): () => void {
-      const socket = new WS(wsUrl);
+      socket = new WS(wsUrl);
       const onMessage = (ev: MessageEvent) => {
         let decoded: unknown;
         try {
@@ -179,10 +211,16 @@ export function createHttpTransport(opts: HttpTransportOptions = {}): Transport 
         const event = parsePatch(decoded);
         if (event !== null) handler(event);
       };
+      const onOpen = () => notifyConnection(true);
+      const onClose = () => notifyConnection(false);
+      socket.addEventListener("open", onOpen);
+      socket.addEventListener("close", onClose);
       socket.addEventListener("message", onMessage);
       return () => {
-        socket.removeEventListener("message", onMessage);
-        socket.close();
+        socket?.removeEventListener("open", onOpen);
+        socket?.removeEventListener("close", onClose);
+        socket?.removeEventListener("message", onMessage);
+        socket?.close();
       };
     },
   };
