@@ -58,6 +58,17 @@ services:
       timeout: 3s
       retries: 60
 
+  # The React + TypeScript dashboard's component-test runner. Its default
+  # exercise is `npm run test:ui` (Vitest + RTL under jsdom) with a mocked
+  # REST + WS transport, so it deliberately has no dependency on the
+  # db/replica/redis/cdc topology — the phase proof
+  # `docker compose -f docker-compose.test.yml run --rm web npm run test:ui`
+  # runs entirely in-process.
+  web:
+    build:
+      context: ./web
+      dockerfile: Dockerfile
+
   redis:
     image: redis:7-alpine
     healthcheck:
