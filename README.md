@@ -14,6 +14,9 @@ WebSocket — derived from the Postgres WAL, with **no dual-write**.
 
 ---
 
+
+⚙️⚙️ Built with [ratchet harness](https://github.com/joctaTorres/ratchet) ⚙️⚙️
+
 ## ⚡ Quick start — run it end to end
 
 **One command** serves the entire system *and* drives a continuous 50-vehicle
