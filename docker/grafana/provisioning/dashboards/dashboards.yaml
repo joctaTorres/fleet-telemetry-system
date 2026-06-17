@@ -1,0 +1,21 @@
+# Grafana dashboard provider provisioning.
+#
+# A single file-based provider that auto-loads any dashboard JSON dropped into
+# /var/lib/grafana/dashboards (mounted read-only from docker/grafana/dashboards).
+# Downstream changes (e.g. ingestion-dashboard) only need to drop a JSON file
+# there — no manual import. Folder structure on disk becomes Grafana folders.
+#
+# Mounted read-only into the grafana container under
+# /etc/grafana/provisioning/dashboards.
+apiVersion: 1
+
+providers:
+  - name: fleet-dashboards
+    orgId: 1
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

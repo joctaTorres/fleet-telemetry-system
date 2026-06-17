@@ -1,0 +1,61 @@
+// Grafana Alloy — the single OTLP front door for the fleet telemetry system.
+//
+// Every instrumented service (the ingestion API now, the frontend API / CDC
+// consumer and the browser SDK later) sends OTLP to Alloy. Alloy is the only
+// component that knows where traces and metrics actually land: it routes traces
+// to Tempo over OTLP/HTTP and converts metrics to Prometheus samples pushed to
+// Prometheus via remote write. Service endpoints resolve over the compose
+// network (tempo:4318, prometheus:9090); nothing here is a credential.
+
+// OTLP receiver — accepts traces + metrics on gRPC (4317) and HTTP (4318).
+otelcol.receiver.otlp "default" {
+  grpc {
+    endpoint = "0.0.0.0:4317"
+  }
+  http {
+    endpoint = "0.0.0.0:4318"
+    // The browser SDK (service.name=fleet-dashboard-web) POSTs OTLP/HTTP from the
+    // SPA origin http://localhost:8080 — a cross-origin request. Answer its CORS
+    // preflight and allow the POST so the browser export is not blocked. The
+    // localhost default suits the local runtime/demo.
+    cors {
+      allowed_origins = ["http://localhost:8080"]
+      allowed_headers = ["*"]
+    }
+  }
+
+  output {
+    traces  = [otelcol.processor.batch.default.input]
+    metrics = [otelcol.processor.batch.default.input]
+  }
+}
+
+// Batch for efficiency before fan-out to the two backends.
+otelcol.processor.batch "default" {
+  output {
+    traces  = [otelcol.exporter.otlphttp.tempo.input]
+    metrics = [otelcol.exporter.prometheus.to_prometheus.input]
+  }
+}
+
+// Traces → Tempo over OTLP/HTTP. Plaintext over the compose network.
+otelcol.exporter.otlphttp "tempo" {
+  client {
+    endpoint = "http://tempo:4318"
+    tls {
+      insecure = true
+    }
+  }
+}
+
+// Metrics → convert OTLP metrics to Prometheus series, then remote-write them
+// into Prometheus (started with --web.enable-remote-write-receiver).
+otelcol.exporter.prometheus "to_prometheus" {
+  forward_to = [prometheus.remote_write.to_prometheus.receiver]
+}
+
+prometheus.remote_write "to_prometheus" {
+  endpoint {
+    url = "http://prometheus:9090/api/v1/write"
+  }
+}

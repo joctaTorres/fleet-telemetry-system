@@ -1,0 +1,59 @@
+# Grafana Tempo — single-binary mode with local block storage.
+#
+# Alloy fans OTLP traces here over OTLP/HTTP (tempo:4318). Tempo also enables the
+# OTLP gRPC receiver for completeness. The HTTP API (queries + readiness) is on
+# 3200, exposed to the host so the proof-of-work can search for spans.
+#
+# Storage is local (WAL + blocks under a named volume) so traces survive a
+# restart — single-host, no object store needed for this slice. Config is kept
+# minimal: defaults cover the ingester/compactor for a local demo stack.
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+# The metrics generator derives the service graph from received traces. It builds
+# request/latency series from client/server (and producer/consumer) span pairs and
+# remote-writes them to Prometheus (which runs with --web.enable-remote-write-receiver),
+# yielding the `traces_service_graph_request_total` series the capstone queries.
+# WAL/traces live under the existing /var/tempo named volume so they survive restarts.
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+  traces_storage:
+    path: /var/tempo/generator/traces
+
+# Enable the service-graphs processor by default for received traces (the 2.7
+# nested overrides form) so the distributor feeds spans to the generator without
+# any per-tenant override call.
+overrides:
+  defaults:
+    metrics_generator:
+      processors:
+        - service-graphs
+
+# Disable the anonymous usage report — no outbound calls from a local demo stack.
+usage_report:
+  reporting_enabled: false

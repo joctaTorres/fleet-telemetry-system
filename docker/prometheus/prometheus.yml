@@ -1,0 +1,20 @@
+# Prometheus scrape config for the observability backbone.
+#
+# Prometheus is started with --web.enable-remote-write-receiver (see
+# docker-compose.yml) so Alloy can push OTLP-derived metrics here via remote
+# write. In addition it scrapes two pull targets: itself, and Alloy's own
+# internal metrics endpoint (the Alloy UI/metrics port 12345) so the health of
+# the pipeline is observable.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  - job_name: alloy
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["alloy:12345"]

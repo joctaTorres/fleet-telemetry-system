@@ -30,15 +30,50 @@ import signal
 import struct
 import threading
 import time
+from contextlib import suppress
 
 import psycopg
 import redis as redis_sync
+from opentelemetry import metrics, trace
 from psycopg import pq
 from psycopg.conninfo import make_conninfo
 
 from .cdc import PUBLICATION_NAME, SLOT_NAME, TABLE_EVENT_TYPES
 from .config import get_dsn, get_redis_url
-from .events import EVENT_CHANNEL
+from .events import EVENT_CHANNEL, inject_trace_context
+from .otel import configure_otel
+
+#: Service identity for every span and metric this process emits. Kept as a
+#: module constant so the startup wiring and the tests bind to the same value.
+SERVICE_NAME = "cdc-consumer"
+
+# Module-level tracer and meter pulled straight off the shared bootstrap's
+# globals. They are proxies until :func:`configure_otel` installs the real
+# providers at process startup (in ``run_forever``); created here at import they
+# stay no-ops when ``OTEL_EXPORTER_OTLP_ENDPOINT`` is unset, so import, the
+# conftest background-thread consumer, and pytest are unaffected. No SDK /
+# exporter wiring is duplicated — all of it lives in :func:`app.otel.configure_otel`.
+_tracer = trace.get_tracer(__name__)
+_meter = metrics.get_meter(__name__)
+
+# Explicit, stable event metrics for the throughput / lag / publish-count panels.
+# Names and the single ``cdc.event_type`` attribute are fixed here so the
+# downstream "CDC Consumer" / "Pub/Sub" / "Redis Fan-out" dashboards bind to them
+# deterministically (these become ``cdc_events_published_total`` and
+# ``cdc_decode_lag_*`` in Prometheus). Both hang off the global meter, so with no
+# endpoint set they record against the no-op provider and export nothing. Recorded
+# only for watched-table changes (see :meth:`CdcConsumer._emit`). Module-level so
+# tests can swap in an in-memory meter.
+EVENT_COUNTER = _meter.create_counter(
+    "cdc.events_published",
+    unit="1",
+    description="Count of CDC events published to Redis, keyed by event type.",
+)
+DECODE_LAG = _meter.create_histogram(
+    "cdc.decode.lag",
+    unit="ms",
+    description="Per-change decode/translate/publish processing latency in ms.",
+)
 
 #: Seconds between the unix epoch and the Postgres epoch (2000-01-01), used to
 #: stamp standby status-update feedback messages.
@@ -297,10 +332,42 @@ class CdcConsumer:
     def _emit(self, oid: int, values: dict[str, object]) -> None:
         relname, _columns = self._relations[oid]
         event_type = TABLE_EVENT_TYPES.get(relname)
-        if event_type is None:  # not a watched table — nothing to publish
+        if event_type is None:  # not a watched table — no event, no span, no metric
             return
-        envelope = {"type": event_type, "payload": _build_payload(relname, values)}
-        self._redis.publish(EVENT_CHANNEL, json.dumps(envelope))
+        # A watched change: time the decode/translate/publish and wrap it in a
+        # decode span with a nested publish span. The publish span is the single
+        # seam that carries the W3C traceparent across the Redis hop: while it is
+        # the active span we inject the active context into the envelope's reserved
+        # carrier, so the propagated ``traceparent`` points at this publish span and
+        # the frontend's subscribe span hangs off it. Recording never gates the
+        # publish: the spans are plain context managers (a publish failure still
+        # propagates to the supervisor exactly as before), injection is defensive
+        # (``inject_trace_context`` never raises, so it can never block the publish
+        # or change the once-per-committed-change guarantee), and the metrics are
+        # recorded after, defensively, so they can never block or break the pump loop.
+        start = time.perf_counter()
+        with _tracer.start_as_current_span("cdc.decode") as decode_span:
+            decode_span.set_attribute("cdc.event_type", event_type)
+            decode_span.set_attribute("cdc.table", relname)
+            envelope = {"type": event_type, "payload": _build_payload(relname, values)}
+            # PRODUCER kind so Tempo's service-graphs processor pairs this span
+            # with the frontend's CONSUMER subscribe span and draws the
+            # cdc-consumer -> frontend-api pub/sub edge across the Redis hop.
+            with _tracer.start_as_current_span(
+                "cdc.publish", kind=trace.SpanKind.PRODUCER
+            ) as publish_span:
+                publish_span.set_attribute("cdc.event_type", event_type)
+                publish_span.set_attribute("messaging.system", "redis")
+                publish_span.set_attribute("messaging.destination", EVENT_CHANNEL)
+                # Inject inside the publish span so the carried traceparent reflects
+                # it; serialize only after, so the carrier rides in the message.
+                inject_trace_context(envelope)
+                message = json.dumps(envelope)
+                self._redis.publish(EVENT_CHANNEL, message)
+        with suppress(Exception):  # metrics must never perturb the pump loop
+            attrs = {"cdc.event_type": event_type}
+            EVENT_COUNTER.add(1, attrs)
+            DECODE_LAG.record((time.perf_counter() - start) * 1000.0, attrs)
 
 
 def _build_payload(relname: str, v: dict[str, object]) -> dict[str, object]:
@@ -388,6 +455,12 @@ def run_forever(stop: threading.Event | None = None) -> None:
     """
     if stop is None:
         stop = threading.Event()
+    # Install OTel once at process startup through the shared bootstrap, reading
+    # the endpoint from the environment only. A no-op when
+    # ``OTEL_EXPORTER_OTLP_ENDPOINT`` is unset and idempotent on restart, so it
+    # never re-wires the SDK or perturbs the supervised loop below; the
+    # module-level proxy tracer/meter become backed by the real providers here.
+    configure_otel(SERVICE_NAME)
     # The readiness wait uses a tight, capped backoff so a publication/table that
     # migrates a moment after the service starts is absorbed quickly. A failed
     # *stream* attempt grows the backoff toward the cap (so a sustained outage

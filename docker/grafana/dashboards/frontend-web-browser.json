@@ -1,0 +1,221 @@
+{
+  "uid": "frontend-web-browser",
+  "title": "Frontend Web (Browser)",
+  "tags": ["fleet", "frontend", "browser", "rum", "otel"],
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Browser traces (fleet-dashboard-web)",
+      "description": "Headline panel: recent service.name=fleet-dashboard-web traces from Tempo, emitted by the React SPA's @opentelemetry/sdk-trace-web SDK. This is the exact tag the phase proof searches Tempo for; it populates once a real browser loads the SPA at http://localhost:8080 and the BatchSpanProcessor flushes spans OTLP/HTTP to Alloy. Root traces are 'documentLoad' (page load) and 'HTTP GET' (the REST snapshot fetch/XHR calls). Click a Trace ID to drill into the spans.",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceqlSearch",
+          "filters": [
+            {
+              "id": "service-name",
+              "tag": "service.name",
+              "scope": "resource",
+              "operator": "=",
+              "value": ["fleet-dashboard-web"],
+              "valueType": "string"
+            }
+          ],
+          "limit": 20,
+          "tableType": "traces",
+          "query": "{ resource.service.name = \"fleet-dashboard-web\" }"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "title": "Document load",
+      "description": "Isolates the page-load span the DocumentLoadInstrumentation emits: the 'documentLoad' root span (with its documentFetch and resourceFetch child timings) under service.name=fleet-dashboard-web. Surfaces SPA load latency — how long the browser took to fetch and parse the dashboard document and its static resources. Click a Trace ID to inspect the documentFetch / resourceFetch waterfall.",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "filters": [],
+          "limit": 20,
+          "tableType": "traces",
+          "query": "{ resource.service.name = \"fleet-dashboard-web\" && name = \"documentLoad\" }"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "title": "REST snapshot fetches",
+      "description": "The fetch/XHR client spans for the SPA's one-time REST snapshot reads (GET /vehicles, GET /vehicles/anomalies/latest, GET /zones/counts), emitted by the Fetch/XMLHttpRequest instrumentations under service.name=fleet-dashboard-web. The SDK names these client spans 'HTTP GET'; each carries http.url / http.status_code attributes and injects a W3C traceparent onto the cross-origin frontend-api request. tableType=spans lists one row per fetch span with its http.url.",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 9
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "filters": [],
+          "limit": 20,
+          "tableType": "spans",
+          "query": "{ resource.service.name = \"fleet-dashboard-web\" && name = \"HTTP GET\" && span.http.method = \"GET\" }"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "title": "Browser → frontend-api joined trace",
+      "description": "Distributed-trace proof of the traceparent join: traces that contain BOTH a service.name=fleet-dashboard-web spanset AND a service.name=frontend-api spanset. The browser's 'HTTP GET' CLIENT span propagates a W3C traceparent onto the cross-origin REST fetch, so frontend-api parents its server span (e.g. 'GET /vehicles/anomalies/latest') under the same trace. Click a Trace ID to drill into the browser → frontend-api waterfall spanning both services.",
+      "type": "table",
+      "datasource": {
+        "type": "tempo",
+        "uid": "tempo"
+      },
+      "gridPos": {
+        "h": 9,
+        "w": 24,
+        "x": 0,
+        "y": 18
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "tempo",
+            "uid": "tempo"
+          },
+          "queryType": "traceql",
+          "filters": [],
+          "limit": 20,
+          "tableType": "traces",
+          "query": "{ resource.service.name = \"fleet-dashboard-web\" } && { resource.service.name = \"frontend-api\" }"
+        }
+      ]
+    }
+  ]
+}

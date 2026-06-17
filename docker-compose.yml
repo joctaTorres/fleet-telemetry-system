@@ -103,6 +103,10 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@db:5432/${POSTGRES_DB:-fleet}
       REDIS_URL: redis://redis:6379/0
+      # OTLP/HTTP export to Alloy over the compose network. The value comes from
+      # compose config only (env-overridable, never from app source); unset it to
+      # run the CDC consumer with no exporter and no collector.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
     depends_on:
       db:
         condition: service_healthy
@@ -110,6 +114,38 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # Start only after the observability backbone is up: Alloy itself gates on
+      # Tempo + Prometheus being healthy, so the OTLP front door is reachable.
+      alloy:
+        condition: service_started
+
+  # The streaming-replication lag probe: a long-lived `python -m
+  # app.replication_probe` that samples pg_stat_replication on the primary and
+  # the replay position/timestamp on the replica, emitting the lag as the custom
+  # OTel gauges `pg_replication_lag_bytes` / `pg_replication_lag_seconds` over
+  # the same OTLP/HTTP -> Alloy path. Read-only monitoring queries only; it never
+  # writes and never touches the replication slot.
+  replication-probe:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.replication_probe"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@db:5432/${POSTGRES_DB:-fleet}
+      REPLICA_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@replica:5432/${POSTGRES_DB:-fleet}
+      # OTLP/HTTP export to Alloy over the compose network. The value comes from
+      # compose config only (env-overridable, never from app source); unset it to
+      # run the probe with no exporter and no collector.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
+    depends_on:
+      db:
+        condition: service_healthy
+      replica:
+        condition: service_healthy
+      # Start only after the observability backbone is up: Alloy itself gates on
+      # Tempo + Prometheus being healthy, so the OTLP front door is reachable.
+      alloy:
+        condition: service_started
 
   ingestion:
     build:
@@ -119,6 +155,10 @@ services:
       ["uvicorn", "app.ingestion_api:app", "--host", "0.0.0.0", "--port", "8001"]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@db:5432/${POSTGRES_DB:-fleet}
+      # OTLP/HTTP export to Alloy over the compose network. The value comes from
+      # compose config only (env-overridable, never from app source); unset it to
+      # run the ingestion app with no exporter and no collector.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
     ports:
       - "${INGESTION_PORT:-8001}:8001"
     depends_on:
@@ -126,6 +166,10 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # Start only after the observability backbone is up: Alloy itself gates on
+      # Tempo + Prometheus being healthy, so the OTLP front door is reachable.
+      alloy:
+        condition: service_started
     healthcheck:
       # The ingestion app exposes no GET; a 404/405 on / still proves it serves.
       test:
@@ -147,6 +191,10 @@ services:
       DATABASE_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@db:5432/${POSTGRES_DB:-fleet}
       REPLICA_URL: postgresql://${POSTGRES_USER:-fleet}:${POSTGRES_PASSWORD:-fleet}@replica:5432/${POSTGRES_DB:-fleet}
       REDIS_URL: redis://redis:6379/0
+      # OTLP/HTTP export to Alloy over the compose network. The value comes from
+      # compose config only (env-overridable, never from app source); unset it to
+      # run the frontend app with no exporter and no collector.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://alloy:4318}
     ports:
       - "${FRONTEND_PORT:-8002}:8002"
     depends_on:
@@ -158,6 +206,10 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # Start only after the observability backbone is up: Alloy itself gates on
+      # Tempo + Prometheus being healthy, so the OTLP front door is reachable.
+      alloy:
+        condition: service_started
     healthcheck:
       test:
         [
@@ -179,11 +231,123 @@ services:
       args:
         VITE_API_BASE_URL: ${VITE_API_BASE_URL:-http://localhost:8002}
         VITE_WS_URL: ${VITE_WS_URL:-ws://localhost:8002/ws}
+        # Browser-origin OTLP/HTTP traces endpoint: the SPA's @opentelemetry SDK
+        # POSTs spans to Alloy's host-published OTLP/HTTP receiver. Baked at build
+        # time from compose config only; env-overridable, unset = no-op.
+        VITE_OTLP_TRACES_ENDPOINT: ${VITE_OTLP_TRACES_ENDPOINT:-http://localhost:4318/v1/traces}
     ports:
       - "${DASHBOARD_PORT:-8080}:80"
     depends_on:
       frontend:
         condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Observability backbone: Alloy (OTLP front door) -> Tempo (traces) +
+  # Prometheus (metrics) -> Grafana (visualization). This change ships only the
+  # backbone; datasource/dashboard provisioning and app instrumentation land in
+  # the follow-on changes of the ingestion-trace-backbone phase. All host port
+  # mappings are environment-overridable, mirroring the existing *_PORT
+  # convention; cross-service endpoints resolve over the compose network.
+  # ---------------------------------------------------------------------------
+
+  # Grafana Tempo, single-binary mode with local block storage. Its OTLP
+  # receivers (4317/4318) accept traces forwarded by Alloy; the HTTP API + ready
+  # endpoint on 3200 is exposed for queries and the proof-of-work trace search.
+  tempo:
+    # Pinned to 2.7.x: the 3.0 image is fully distroless (no shell) so an
+    # in-container healthcheck can't run, and 3.0 also dropped the legacy
+    # single-binary config keys. 2.7.2 ships busybox (wget) for the healthcheck.
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./docker/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      - "${TEMPO_PORT:-3200}:3200"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3200/ready | grep -q ready || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # Prometheus with the remote-write receiver enabled so Alloy can push
+  # OTLP-derived metrics; it also scrapes itself and Alloy (see prometheus.yml).
+  prometheus:
+    image: prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.enable-remote-write-receiver
+      - --storage.tsdb.path=/prometheus
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:9090/-/ready || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # Grafana Alloy as the single OTLP collector: receives on 4317/4318 and fans
+  # traces to Tempo and metrics to Prometheus. The 4318 OTLP/HTTP port and the
+  # 12345 UI/metrics port are exposed to the host.
+  alloy:
+    image: grafana/alloy:latest
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./docker/alloy/config.alloy:/etc/alloy/config.alloy:ro
+    ports:
+      - "${ALLOY_OTLP_PORT:-4318}:4318"
+      - "${ALLOY_UI_PORT:-12345}:12345"
+    depends_on:
+      tempo:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      # The Alloy image is Ubuntu-based with bash but no wget/curl, so probe the
+      # ready endpoint over bash's /dev/tcp and assert a 200 status line.
+      test:
+        - CMD
+        - bash
+        - -c
+        - 'exec 3<>/dev/tcp/localhost/12345; printf "GET /-/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n" >&3; grep -q "200 OK" <&3'
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  # Grafana, the visualization surface. Anonymous access (Admin role) is enabled
+  # for the local demo; admin/admin is the fallback login. The Tempo + Prometheus
+  # datasources and a file-based dashboard provider are provisioned read-only from
+  # docker/grafana/ so everything is preloaded on a clean `docker compose up`.
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      tempo:
+        condition: service_healthy
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/api/health || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
 
   # k6 fires on `up` and drives a CONTINUOUS load. Each of 50 VUs owns one vehicle
   # and streams ~1 Hz stateful telemetry through the ingestion API, reading back
@@ -211,3 +375,6 @@ volumes:
   db-data:
   replica-data:
   redis-data:
+  tempo-data:
+  prometheus-data:
+  grafana-data:
