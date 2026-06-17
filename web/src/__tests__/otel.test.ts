@@ -2,6 +2,8 @@
 // a running collector: the bootstrap must be a safe no-op when no OTLP endpoint
 // is configured, and when one is given it must register a provider whose
 // resource carries the exact service.name the phase proof searches Tempo for.
+import { ZoneContextManager } from "@opentelemetry/context-zone";
+import { context } from "@opentelemetry/api";
 import { describe, expect, it } from "vitest";
 import { initBrowserOtel, SERVICE_NAME } from "../otel";
 
@@ -25,5 +27,24 @@ describe("initBrowserOtel", () => {
       "fleet-dashboard-web",
     );
     expect(SERVICE_NAME).toBe("fleet-dashboard-web");
+  });
+
+  it("registers a ZoneContextManager so browser context propagates across async hops", () => {
+    // Without a context manager, fetch spans become detached trace roots instead
+    // of children of the document-load/interaction context, breaking the joined
+    // browser->frontend-api trace. register({ contextManager: ... }) installs the
+    // ZoneContextManager as the global context manager, so assert that the active
+    // global context manager is exactly a ZoneContextManager instance.
+    const handle = initBrowserOtel({
+      otlpTracesEndpoint: "http://localhost:4318/v1/traces",
+    });
+    expect(handle).not.toBeNull();
+
+    // _getContextManager() is the internal accessor the OTel context API exposes
+    // on the global ContextAPI singleton; it returns the manager set by register.
+    const activeManager = (
+      context as unknown as { _getContextManager: () => unknown }
+    )._getContextManager();
+    expect(activeManager).toBeInstanceOf(ZoneContextManager);
   });
 });

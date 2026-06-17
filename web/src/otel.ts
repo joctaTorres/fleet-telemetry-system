@@ -14,6 +14,7 @@
 // unconditionally. The endpoint and the API origin come only from VITE_* build
 // args; no host/port is hard-coded here.
 
+import { ZoneContextManager } from "@opentelemetry/context-zone";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { registerInstrumentations } from "@opentelemetry/instrumentation";
@@ -103,8 +104,16 @@ export function initBrowserOtel(
   });
 
   // W3C trace-context propagation is what carries `traceparent` from the browser
-  // fetch span onto the request, so frontend-api can parent its server span.
-  provider.register({ propagator: new W3CTraceContextPropagator() });
+  // fetch span onto the request, so frontend-api can parent its server span. The
+  // ZoneContextManager propagates the active span context across the async hops
+  // (await/Promise/setTimeout) between the document-load/interaction context and
+  // the fetch, so fetch spans nest under that context instead of becoming
+  // detached trace roots — which is what makes the browser->frontend-api trace
+  // actually join up.
+  provider.register({
+    contextManager: new ZoneContextManager(),
+    propagator: new W3CTraceContextPropagator(),
+  });
 
   registerInstrumentations({
     tracerProvider: provider,
